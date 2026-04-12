@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Dev startup script to run Uvicorn against bin/_asgi.py with project path setup
+# - Reads host/port from var/dev_server.conf (auto-generated if missing)
+# - Ensures working dir is project root
+# - Adds bin/ to sys.path via --app-dir
+# - Optional: tries to start Redis for Channels if not already running
+#
+# Usage:
+#   ./bin/asgi_local
+#   HOST=127.0.0.1 PORT=8000 ./bin/asgi_local
+#   ./bin/asgi_local --log-level debug
+set -Eeuo pipefail
+
+# Resolve project root (one level up from this script)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+cd "$ROOT_DIR"
+
+# Ensure uvicorn is available
+if ! command -v uvicorn >/dev/null 2>&1; then
+  echo "uvicorn is not installed. Install it with: pip install 'uvicorn[standard]'" >&2
+  exit 1
+fi
+
+# Ensure var directories exist for logs, etc.
+mkdir -p "$ROOT_DIR/var/logs"
+
+# Auto-generate dev_server.conf if it doesn't exist (random port avoids collisions)
+CONF_FILE="$ROOT_DIR/var/dev_server.conf"
+if [[ ! -f "$CONF_FILE" ]]; then
+  RANDOM_PORT=$(( (RANDOM % 4801) + 5000 ))
+  echo "host=localhost" > "$CONF_FILE"
+  echo "port=$RANDOM_PORT" >> "$CONF_FILE"
+  echo "Generated $CONF_FILE (port=$RANDOM_PORT)"
+fi
+
+# Try to ensure the local PostgreSQL role/database exist in dev
+if [[ "${SKIP_LOCAL_POSTGRES_SETUP:-0}" != "1" ]]; then
+  if [[ -x "$ROOT_DIR/bin/setup_local_postgres" ]]; then
+    "$ROOT_DIR/bin/setup_local_postgres"
+  elif [[ -f "$ROOT_DIR/bin/setup_local_postgres" ]]; then
+    bash "$ROOT_DIR/bin/setup_local_postgres"
+  else
+    echo "setup_local_postgres not found. Skipping PostgreSQL bootstrap." >&2
+  fi
+fi
+
+# Try to ensure Redis (useful for Channels' channel layer) is available in dev
+if command -v redis-cli >/dev/null 2>&1; then
+  PONG="$(redis-cli ping 2>&1 || true)"
+  if [[ "$PONG" != "PONG" ]]; then
+    echo "No Redis server running. Attempting to start..."
+    if command -v redis-server >/dev/null 2>&1; then
+      redis-server > var/redis.log 2>&1 &
+      sleep 2
+      PONG="$(redis-cli ping 2>&1 || true)"
+      if [[ "$PONG" == "PONG" ]]; then
+        echo "Redis server started successfully."
+      else
+        echo "Failed to start Redis server. Continuing without Redis..." >&2
+      fi
+    else
+      echo "redis-server not found. Skipping Redis startup." >&2
+    fi
+  else
+    echo "Redis server is running."
+  fi
+else
+  echo "redis-cli not found. Skipping Redis check." >&2
+fi
+
+# Load host/port from config (allow env overrides)
+HOST="${HOST:-}"
+PORT="${PORT:-}"
+if [[ -z "${HOST}" || -z "${PORT}" ]]; then
+  HOST="${HOST:-$(grep -E '^host=' "$CONF_FILE" | cut -d '=' -f2)}"
+  PORT="${PORT:-$(grep -E '^port=' "$CONF_FILE" | cut -d '=' -f2)}"
+fi
+
+# Django env (paths.py will add config/ to sys.path once imported by _asgi.py)
+export DJANGO_SETTINGS_MODULE="${DJANGO_SETTINGS_MODULE:-settings}"
+export PYTHONUNBUFFERED=1
+ASGI_MODULE="${ASGI_MODULE:-_asgi:application}"
+
+echo "Starting Uvicorn (ASGI) on $HOST:$PORT"
+echo "Module: $ASGI_MODULE (app-dir: $ROOT_DIR/bin)"
+
+# --app-dir adds bin/ to sys.path so _asgi.py can import paths.py
+exec uvicorn "$ASGI_MODULE" \
+  --app-dir "$ROOT_DIR/bin" \
+  --host "$HOST" \
+  --port "$PORT" \
+  --reload \
+  --reload-include '*.conf' \
+  "$@"

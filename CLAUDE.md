@@ -11,8 +11,8 @@ source .venv/bin/activate
 # Django management
 .venv/bin/python ./bin/manage.py <command>
 
-# Run dev server
-.venv/bin/python ./bin/manage.py runserver 9009
+# Run dev server (ASGI via Uvicorn, auto-generates var/dev_server.conf on first run)
+./bin/run_dev_server
 
 # Run tests
 bin/run_tests -t test_module.filename

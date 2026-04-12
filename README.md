@@ -4,11 +4,10 @@ Project skeleton for building applications with [django-mojo](https://github.com
 
 ## Quick Start
 
-### 1. Clone and rename
+### 1. Create your project
 
 ```bash
-cp -r django-mojo-skeleton ~/Projects/mojo/my-new-project
-cd ~/Projects/mojo/my-new-project
+git clone --depth 1 https://github.com/NativeMojo/django-mojo-skeleton.git my-project && cd my-project && rm -rf .git && git init
 ```
 
 ### 2. Update project references
