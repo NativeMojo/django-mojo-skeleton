@@ -1,0 +1,29 @@
+#!/usr/bin/env python
+
+import os
+import sys
+from pathlib import Path
+
+# Check if .venv exists and we're not already in a virtual environment
+script_dir = Path(__file__).parent
+project_root = script_dir.parent
+venv_path = project_root / ".venv"
+
+if venv_path.exists() and not hasattr(sys, 'real_prefix') and sys.prefix == sys.base_prefix:
+    # Not in a virtual environment, but .venv exists
+    # Re-execute this script using the .venv python
+    venv_python = venv_path / "bin" / "python"
+    if venv_python.exists():
+        os.execv(str(venv_python), [str(venv_python)] + sys.argv)
+    else:
+        print(f"Warning: .venv exists but python not found at {venv_python}")
+
+import paths
+# Import logging and helper modules
+paths.load_apps(True)
+from mojo.helpers import paths as jpaths
+jpaths.configure_paths(__file__, 0)
+from testit import runner
+
+if __name__ == "__main__":
+    runner.main(runner.setup_parser())

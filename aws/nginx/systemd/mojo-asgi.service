@@ -1,0 +1,47 @@
+[Unit]
+Description=Uvicorn ASGI for Django (/opt/api) via Unix socket
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=www
+Group=www
+PermissionsStartOnly=true
+
+WorkingDirectory=/opt/api/bin
+
+Environment="DJANGO_SETTINGS_MODULE=settings"
+Environment="PYTHONUNBUFFERED=1"
+Environment="FORWARDED_ALLOW_IPS=*"
+Environment="LOG_LEVEL=info"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+
+ExecStartPre=/usr/bin/install -d -m 0775 -o www -g www /opt/api/var
+ExecStartPre=/usr/bin/install -d -m 0775 -o www -g www /opt/api/var/logs
+ExecStartPre=/usr/bin/install -d -m 0775 -o www -g www /opt/api/var/pids
+ExecStartPre=/usr/sbin/restorecon -Rv /opt/api/var
+
+ExecStartPre=/usr/bin/rm -f /opt/api/var/asgi.sock
+
+UMask=007
+
+ExecStart=/usr/bin/env uvicorn \
+  _asgi:application \
+  --app-dir /opt/api/bin \
+  --uds /opt/api/var/asgi.sock \
+  --workers 4 \
+  --proxy-headers \
+  --forwarded-allow-ips=${FORWARDED_ALLOW_IPS} \
+  --timeout-keep-alive 75 \
+  --no-access-log \
+  --log-level ${LOG_LEVEL}
+
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=10s
+Restart=always
+RestartSec=1s
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

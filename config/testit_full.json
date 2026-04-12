@@ -1,0 +1,7 @@
+{
+    "tests": [],
+    "stop_on_fail": true,
+    "show_errors": true,
+    "verbose": true,
+    "nomojo": true
+}

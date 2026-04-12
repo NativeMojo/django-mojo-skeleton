@@ -1,0 +1,16 @@
+{
+    "installed": [
+        "mojo.apps.account",
+        "mojo.apps.logit",
+        "mojo.apps.metrics",
+        "mojo.apps.fileman",
+        "mojo.apps.incident",
+        "mojo.apps.jobs",
+        "mojo.apps.realtime",
+        "django.contrib.auth",
+        "django.contrib.contenttypes",
+        "django.contrib.sessions",
+        "django.contrib.messages",
+        "django.contrib.staticfiles"
+    ]
+}

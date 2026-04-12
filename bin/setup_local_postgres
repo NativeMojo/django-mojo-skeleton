@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+#
+# Ensures the local PostgreSQL role/database expected by Django exist.
+#
+# Defaults:
+#   role:      mojo_test
+#   database:  my_mojo_project
+#   host:      localhost
+#   port:      5432
+#
+# Usage:
+#   ./bin/setup_local_postgres
+#   ./bin/setup_local_postgres --migrate
+#   MOJO_PG_DB=mydb ./bin/setup_local_postgres
+#
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
+
+DB_USER="${MOJO_PG_USER:-mojo_test}"
+DB_NAME="${MOJO_PG_DB:-my_mojo_project}"
+DB_HOST="${MOJO_PG_HOST:-localhost}"
+DB_PORT="${MOJO_PG_PORT:-5432}"
+
+ADMIN_USER="${MOJO_PG_ADMIN_USER:-${POSTGRES_SUPERUSER:-}}"
+ADMIN_DB="${MOJO_PG_ADMIN_DB:-postgres}"
+ADMIN_HOST="${MOJO_PG_ADMIN_HOST:-}"
+ADMIN_PORT="${MOJO_PG_ADMIN_PORT:-$DB_PORT}"
+
+RUN_MIGRATIONS=0
+CREATE_ROLE=1
+CREATE_DB=1
+QUIET=0
+
+usage() {
+  cat <<EOF
+Usage: ./bin/setup_local_postgres [options]
+
+Ensures the local PostgreSQL role/database expected by Django exist.
+
+Options:
+  --migrate         Run Django migrations after creating the role/database
+  --no-create-role  Do not create the PostgreSQL role
+  --no-create-db    Do not create the PostgreSQL database
+  -q, --quiet       Reduce output
+  -h, --help        Show this help
+EOF
+}
+
+say() { if [ "$QUIET" -ne 1 ]; then printf '%s\n' "$*"; fi; }
+warn() { printf '%s\n' "setup_local_postgres: $*" >&2; }
+die() { warn "$1"; exit "${2:-1}"; }
+valid_ident() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; }
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --migrate) RUN_MIGRATIONS=1 ;;
+    --no-create-role) CREATE_ROLE=0 ;;
+    --no-create-db) CREATE_DB=0 ;;
+    -q|--quiet) QUIET=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "Unknown option: $1" ;;
+  esac
+  shift
+done
+
+valid_ident "$DB_USER" || die "Invalid role name '${DB_USER}'"
+valid_ident "$DB_NAME" || die "Invalid database name '${DB_NAME}'"
+command -v psql >/dev/null 2>&1 || die "psql is not installed or not on PATH."
+
+admin_args=(-X -w -v ON_ERROR_STOP=1 -d "$ADMIN_DB")
+[ -n "$ADMIN_USER" ] && admin_args+=(-U "$ADMIN_USER")
+[ -n "$ADMIN_HOST" ] && admin_args+=(-h "$ADMIN_HOST")
+[ -n "$ADMIN_PORT" ] && admin_args+=(-p "$ADMIN_PORT")
+
+app_args=(-X -w -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME")
+
+admin_query() { psql "${admin_args[@]}" -tAc "$1"; }
+admin_exec() { psql "${admin_args[@]}" -c "$1" >/dev/null; }
+query_scalar() { admin_query "$1" | tr -d '[:space:]'; }
+
+role_exists() { [ "$(query_scalar "SELECT 1 FROM pg_roles WHERE rolname = '${DB_USER}'")" = "1" ]; }
+db_exists() { [ "$(query_scalar "SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}'")" = "1" ]; }
+
+# Check admin connection
+if ! psql "${admin_args[@]}" -tAc 'SELECT 1' >/dev/null 2>&1; then
+    warn "Could not connect to PostgreSQL with admin settings."
+    warn "Try: MOJO_PG_ADMIN_USER=postgres ./bin/setup_local_postgres"
+    exit 1
+fi
+
+# Create role
+if [ "$CREATE_ROLE" -eq 1 ]; then
+    if role_exists; then
+        say "Role '${DB_USER}' already exists."
+    else
+        say "Creating role '${DB_USER}'..."
+        admin_exec "CREATE ROLE \"${DB_USER}\" LOGIN" || die "Failed to create role"
+    fi
+fi
+
+# Create database
+if [ "$CREATE_DB" -eq 1 ]; then
+    if db_exists; then
+        say "Database '${DB_NAME}' already exists."
+    else
+        say "Creating database '${DB_NAME}' owned by '${DB_USER}'..."
+        admin_exec "CREATE DATABASE \"${DB_NAME}\" OWNER \"${DB_USER}\"" || die "Failed to create database"
+    fi
+fi
+
+# Grant access
+if db_exists && role_exists; then
+    admin_exec "GRANT ALL PRIVILEGES ON DATABASE \"${DB_NAME}\" TO \"${DB_USER}\"" 2>/dev/null || true
+fi
+
+# Verify app connection
+if psql "${app_args[@]}" -tAc 'SELECT 1' >/dev/null 2>&1; then
+    say "Verified connection to '${DB_NAME}' as '${DB_USER}'."
+else
+    warn "Bootstrap succeeded, but app connection test failed."
+fi
+
+# Optional migrations
+if [ "$RUN_MIGRATIONS" -eq 1 ]; then
+    local py
+    if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
+        py="$ROOT_DIR/.venv/bin/python"
+    else
+        py="$(command -v python3)"
+    fi
+    say "Running Django migrations..."
+    "$py" "$ROOT_DIR/bin/manage.py" migrate
+fi
+
+say "Local PostgreSQL bootstrap complete."

@@ -1,0 +1,168 @@
+#!/usr/bin/env python
+"""
+bin/versioning - bump and synchronize project version
+
+Usage:
+  versioning major        # bump X.y.z -> (X+1).0.0
+  versioning minor        # bump x.Y.z -> x.(Y+1).0
+  versioning rev          # bump x.y.Z -> x.y.(Z+1)
+  versioning set 1.2.3    # set to an explicit version
+
+Options:
+  -n, --dry-run           # show planned changes without writing
+
+This script updates both:
+  - pyproject.toml [project].version
+  - config/settings/version.py __version__
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PYPROJECT = ROOT / "pyproject.toml"
+VERSION_PY = ROOT / "config" / "settings" / "version.py"
+
+
+def read_file(path):
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        fail(f"File not found: {path}")
+
+
+def write_file(path, data):
+    path.write_text(data, encoding="utf-8")
+
+
+def parse_semver(s):
+    m = re.match(r"\s*(\d+)\.(\d+)(?:\.(\d+))?", s)
+    if not m:
+        fail(f"Unrecognized version format: {s!r}")
+    major = int(m.group(1))
+    minor = int(m.group(2))
+    patch = int(m.group(3) or 0)
+    return major, minor, patch
+
+
+def bump_version_str(current, part):
+    major, minor, patch = parse_semver(current)
+    if part == "major":
+        return f"{major + 1}.0.0"
+    if part == "minor":
+        return f"{major}.{minor + 1}.0"
+    if part == "rev":
+        return f"{major}.{minor}.{patch + 1}"
+    fail(f"Unknown part to bump: {part}")
+
+
+def extract_pyproject_project_block(text):
+    m = re.search(r"(?m)^\[project\]\s*$", text)
+    if not m:
+        fail("Could not find [project] section in pyproject.toml")
+    start = m.end()
+    next_table = re.search(r"(?m)^\[[^\]]+\]\s*$", text[start:])
+    end = start + next_table.start() if next_table else len(text)
+    return start, end
+
+
+def get_pyproject_version(text):
+    start, end = extract_pyproject_project_block(text)
+    proj = text[start:end]
+    m = re.search(r'(?m)^\s*version\s*=\s*"([^"]+)"\s*$', proj)
+    if m:
+        return m.group(1)
+    m2 = re.search(r'(?m)^\s*version\s*=\s*"([^"]+)"\s*$', text)
+    return m2.group(1) if m2 else None
+
+
+def set_pyproject_version(text, new_version):
+    start, end = extract_pyproject_project_block(text)
+    proj = text[start:end]
+    new_proj, n = re.subn(r'(?m)^(\s*version\s*=\s*")([^"]+)(".*)$',
+                          lambda m: f'{m.group(1)}{new_version}{m.group(3)}',
+                          proj, count=1)
+    if n == 0:
+        new_text, n2 = re.subn(r'(?m)^(\s*version\s*=\s*")([^"]+)(".*)$',
+                               lambda m: f'{m.group(1)}{new_version}{m.group(3)}',
+                               text, count=1)
+        if n2 == 0:
+            fail("Could not locate version key in pyproject.toml to update")
+        return new_text
+    return text[:start] + new_proj + text[end:]
+
+
+def get_version_py(text):
+    m = re.search(r'(?m)^__version__\s*=\s*"([^"]+)"\s*$', text)
+    return m.group(1) if m else None
+
+
+def set_version_py(text, new_version):
+    new_text, n = re.subn(r'(?m)^(__version__\s*=\s*")([^"]+)(".*)$',
+                          lambda m: f'{m.group(1)}{new_version}{m.group(3)}',
+                          text, count=1)
+    if n == 0:
+        suffix = "" if text.endswith("\n") else "\n"
+        new_text = text + f'{suffix}__version__ = "{new_version}"\n'
+    return new_text
+
+
+def fail(msg):
+    print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+        prog="versioning",
+        description="Bump and synchronize project version across pyproject.toml and config/settings/version.py",
+    )
+    parser.add_argument("action", choices=["major", "minor", "rev", "set"], help="Which part to bump or 'set' an explicit version")
+    parser.add_argument("value", nargs="?", help="Version to set when using 'set'")
+    parser.add_argument("-n", "--dry-run", action="store_true", help="Show planned changes without writing")
+    args = parser.parse_args(argv)
+
+    py_text = read_file(PYPROJECT)
+    vpy_text = read_file(VERSION_PY)
+
+    py_ver = get_pyproject_version(py_text)
+    if py_ver is None:
+        fail("Unable to determine current version from pyproject.toml")
+    vpy_ver = get_version_py(vpy_text)
+
+    if vpy_ver and vpy_ver != py_ver:
+        print(f"Warning: version mismatch detected: pyproject={py_ver} settings/version.py={vpy_ver}", file=sys.stderr)
+
+    if args.action == "set":
+        if not args.value:
+            fail("You must provide a version with: versioning set X.Y.Z")
+        new_version = args.value.strip()
+        parse_semver(new_version)
+    else:
+        new_version = bump_version_str(py_ver, args.action)
+
+    new_py_text = set_pyproject_version(py_text, new_version)
+    new_vpy_text = set_version_py(vpy_text, new_version)
+
+    if args.dry_run:
+        print(f"[dry-run] Would update:")
+        print(f"  - {PYPROJECT}: {py_ver} -> {new_version}")
+        print(f"  - {VERSION_PY}: {(vpy_ver or '(none)')} -> {new_version}")
+        sys.exit(0)
+
+    write_file(PYPROJECT, new_py_text)
+    write_file(VERSION_PY, new_vpy_text)
+
+    print(f"Version updated: {py_ver} -> {new_version}")
+    print(f"Synced files:")
+    print(f"  - {PYPROJECT}")
+    print(f"  - {VERSION_PY}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

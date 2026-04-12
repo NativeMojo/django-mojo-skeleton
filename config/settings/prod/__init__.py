@@ -1,0 +1,23 @@
+from .db import *
+
+DEBUG = False
+ALLOW_ADMIN_SITE = False
+ADMIN_SITE_PREFIX = 'not_allowed'
+API_METRICS = True
+API_METRICS_GRANULARITY = "minutes"
+
+REST_AUTO_PREFIX = True
+
+METRICS_TIMEZONE = "America/Los_Angeles"
+
+MOJO_REST_LIST_PERM_DENY = False
+
+LOGIT_DB_ALL = False
+LOGIT_FILE_ALL = False
+LOGIT_RETURN_REAL_ERROR = True
+LOGIT_MAX_RESPONSE_SIZE = 1024
+LOGIT_NO_LOG_PREFIX = ['/api/']
+LOGIT_ALWAYS_LOG_PREFIX = ['POST:/api/user/', 'POST:/api/group/', 'POST:/api/logs']
+LOGIT_ASYNC_LOGGING = True
+
+MOJO_APP_STATUS_200_ON_ERROR = False

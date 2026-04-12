@@ -1,0 +1,84 @@
+# Static website served from /opt/www
+#
+# To enable:
+#   1. Copy to /etc/nginx/conf.d/www.conf (remove .example suffix)
+#   2. Update server_name to your domain
+#   3. Run: sudo certbot --nginx -d yourdomain.com
+#   4. Reload: sudo systemctl reload nginx
+#
+# Deploy static files:
+#   As the deploy user (or via CI/CD):
+#   scp -r dist/* deploy@yourhost:/opt/www/
+#
+
+server {
+    listen 80;
+    server_name www.yourdomain.com;     # <-- change this
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+
+    server_name www.yourdomain.com;     # <-- change this
+
+    root /opt/www;
+    index index.html;
+
+    # Certificates (managed by certbot)
+    # ssl_certificate /etc/letsencrypt/live/www.yourdomain.com/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/www.yourdomain.com/privkey.pem;
+
+    # TLS
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
+    ssl_prefer_server_ciphers on;
+
+    server_tokens off;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy no-referrer-when-downgrade always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+
+    # Bot blocking
+    if ($bad_bot) { return 444; }
+
+    # Custom error pages
+    error_page 404 /errors/404.html;
+    error_page 500 502 503 504 /errors/50x.html;
+
+    location /errors/ {
+        internal;
+        root /opt/www;
+    }
+
+    # Maintenance mode — uncomment to enable
+    # if (-f /opt/www/maintenance.flag) {
+    #     return 503;
+    # }
+    # error_page 503 /errors/maintenance.html;
+
+    # Cache static assets
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    # Try files, fallback to index.html (SPA support)
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
