@@ -69,68 +69,80 @@ def load_credentials():
 
 
 # ── Deploy config (var/deploy.conf) ──────────────────────────────────────────
-DEPLOY_DEFAULTS = {
-    "PROJECT": "myproject",
-    "DOMAIN": "example.com",
-    "DB_NAME": "mojo_myproject",
-    "DB_USER": "postgres",
-    "DB_PASSWORD": "",
-    "REGION": "us-west-2",
-    "INSTANCE_TYPE": "t2.medium",
-    "DB_INSTANCE_CLASS": "db.t3.medium",
-    "CACHE_NODE_TYPE": "cache.t3.medium",
-    "CACHE_NUM_NODES": "2",
-    "EMAIL_FROM": "",
-}
-
-DEPLOY_PROMPTS = {
-    "PROJECT": "Project name (used for AWS resource names, e.g. 'orchestra')",
-    "DOMAIN": "Production domain (e.g. 'maestromojo.com')",
-    "DB_NAME": "PostgreSQL database name",
-    "DB_USER": "PostgreSQL username",
-    "DB_PASSWORD": "PostgreSQL password",
-    "REGION": "AWS region",
-    "INSTANCE_TYPE": "EC2 instance type",
-    "DB_INSTANCE_CLASS": "RDS instance class",
-    "CACHE_NODE_TYPE": "ElastiCache node type",
-    "CACHE_NUM_NODES": "ElastiCache number of nodes",
-    "EMAIL_FROM": "From email address (e.g. 'noreply@maestromojo.com')",
-}
+def _detect_project_name():
+    """Derive project name from the parent directory name."""
+    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    name = os.path.basename(project_dir).lower()
+    # Strip common prefixes: "mojo-orchestra" → "orchestra", "django-myapp" → "myapp"
+    for prefix in ("mojo-", "django-"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+    return name.replace("-", "_").replace(" ", "_")
 
 
-def _run_setup_wizard():
-    """Interactive first-run wizard. Saves to var/deploy.conf."""
+def _generate_password(length=24):
+    """Generate a random password for RDS."""
+    import secrets
+    import string
+    chars = string.ascii_letters + string.digits
+    return "".join(secrets.choice(chars) for _ in range(length))
+
+
+def _run_setup_wizard(existing=None):
+    """Interactive first-run wizard. Only asks for domain and region, derives the rest."""
+    import secrets
+
     print("\n  ── Deploy Setup Wizard ──")
     print("  This creates var/deploy.conf with your project settings.")
     print("  You can edit the file directly or re-run with --init.\n")
 
-    existing = _load_conf(DEPLOY_CONF)
-    vals = {}
+    existing = existing or {}
+    project = _detect_project_name()
 
-    for key, prompt in DEPLOY_PROMPTS.items():
-        default = existing.get(key) or DEPLOY_DEFAULTS.get(key, "")
-        # Auto-derive some defaults from earlier answers
-        if key == "DB_NAME" and "PROJECT" in vals:
-            default = existing.get(key) or f"mojo_{vals['PROJECT']}"
-        if key == "EMAIL_FROM" and "DOMAIN" in vals:
-            default = existing.get(key) or f"noreply@{vals['DOMAIN']}"
+    # Only two questions
+    domain_default = existing.get("DOMAIN", "")
+    region_default = existing.get("REGION", "us-west-2")
 
-        if default:
-            answer = input(f"  {prompt} [{default}]: ").strip()
-            vals[key] = answer or default
-        else:
-            vals[key] = input(f"  {prompt}: ").strip()
+    domain = input(f"  Production domain{f' [{domain_default}]' if domain_default else ''}: ").strip()
+    domain = domain or domain_default
+    if not domain:
+        print("  ERROR: Domain is required (e.g. maestromojo.com)")
+        sys.exit(1)
+
+    region = input(f"  AWS region [{region_default}]: ").strip() or region_default
+
+    # Auto-derive everything else
+    vals = {
+        "PROJECT": existing.get("PROJECT", project),
+        "DOMAIN": domain,
+        "REGION": region,
+        "DB_NAME": existing.get("DB_NAME", f"mojo_{project}"),
+        "DB_USER": existing.get("DB_USER", "postgres"),
+        "DB_PASSWORD": existing.get("DB_PASSWORD", _generate_password()),
+        "INSTANCE_TYPE": existing.get("INSTANCE_TYPE", "t2.medium"),
+        "DB_INSTANCE_CLASS": existing.get("DB_INSTANCE_CLASS", "db.t3.medium"),
+        "CACHE_NODE_TYPE": existing.get("CACHE_NODE_TYPE", "cache.t3.medium"),
+        "CACHE_NUM_NODES": existing.get("CACHE_NUM_NODES", "2"),
+        "EMAIL_FROM": existing.get("EMAIL_FROM", f"noreply@{domain}"),
+    }
 
     _save_conf(DEPLOY_CONF, vals)
     print(f"\n  ✓ Saved to {DEPLOY_CONF}")
+    print(f"    Project:  {vals['PROJECT']}")
+    print(f"    Domain:   {vals['DOMAIN']}")
+    print(f"    Region:   {vals['REGION']}")
+    print(f"    Database: {vals['DB_NAME']}")
+    print(f"    Email:    {vals['EMAIL_FROM']}")
+    print(f"\n  Edit var/deploy.conf to change instance sizes, DB creds, etc.")
     return vals
 
 
 def load_deploy_config(force_init=False):
     """Load deploy config from var/deploy.conf. Runs wizard if missing."""
-    if force_init or not os.path.exists(DEPLOY_CONF):
-        return _run_setup_wizard()
-    return _load_conf(DEPLOY_CONF)
+    existing = _load_conf(DEPLOY_CONF) if os.path.exists(DEPLOY_CONF) else {}
+    if force_init or not existing:
+        return _run_setup_wizard(existing)
+    return existing
 
 
 # ── Config (loaded from var/deploy.conf) ─────────────────────────────────────
