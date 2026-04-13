@@ -1,0 +1,172 @@
+# Combined site: homepage + portal + backend pages + API
+#
+# Pattern:
+#   mydomain.com/              → static homepage (/opt/www/)
+#   mydomain.com/portal/       → web portal SPA (/opt/www/portal/)
+#   mydomain.com/api/          → Django API
+#   mydomain.com/auth|login|…  → Django-rendered pages
+#   mydomain.com/ws/           → WebSocket
+#   mydomain.com/static/       → Django static files
+#
+# To enable:
+#   1. Copy to /etc/nginx/conf.d/site.conf
+#   2. Update server_name and ssl paths
+#   3. Run: sudo certbot --nginx -d yourdomain.com
+#   4. Reload: sudo systemctl reload nginx
+#
+
+# HTTP → HTTPS redirect
+server {
+    listen 80;
+    server_name yourdomain.com;             # <-- change this
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# Upstream (shared with app.conf — only define once)
+# If app.conf is also loaded, remove this block from whichever file loads second.
+upstream asgi_upstream {
+    server unix:///opt/api/var/asgi.sock;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+
+    server_name yourdomain.com;             # <-- change this
+
+    # Certificates (managed by certbot — update paths after first run)
+    # ssl_certificate /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
+    # ssl_trusted_certificate /etc/letsencrypt/live/yourdomain.com/chain.pem;
+
+    # Modern TLS
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
+    ssl_prefer_server_ciphers on;
+    ssl_ecdh_curve X25519:secp256r1;
+
+    ssl_session_cache shared:SSL:50m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    resolver 1.1.1.1 1.0.0.1 8.8.8.8 valid=300s;
+    resolver_timeout 5s;
+
+    server_tokens off;
+    keepalive_timeout 15s;
+    keepalive_requests 1000;
+    client_max_body_size 50M;
+
+    root /opt/www;
+    index index.html;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy no-referrer-when-downgrade always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+
+    # Bot blocking
+    if ($bad_bot) { return 444; }
+
+    # Custom error pages
+    error_page 404 /errors/404.html;
+    error_page 500 502 503 504 /errors/50x.html;
+    location /errors/ {
+        internal;
+        root /opt/www;
+    }
+
+    # -------------------------------------------------------
+    # Django-rendered pages (auth, registration, etc.)
+    # Add or remove location blocks to match your app's routes.
+    # -------------------------------------------------------
+    location /auth {
+        include /etc/nginx/asgi.inc;
+        proxy_pass http://asgi_upstream;
+    }
+
+    location /login {
+        include /etc/nginx/asgi.inc;
+        proxy_pass http://asgi_upstream;
+    }
+
+    location /signin {
+        include /etc/nginx/asgi.inc;
+        proxy_pass http://asgi_upstream;
+    }
+
+    location /register {
+        include /etc/nginx/asgi.inc;
+        proxy_pass http://asgi_upstream;
+    }
+
+    # -------------------------------------------------------
+    # API
+    # -------------------------------------------------------
+    location /api/ {
+        include /etc/nginx/asgi.inc;
+        proxy_pass http://asgi_upstream;
+    }
+
+    # Health check (no logging)
+    location = /api/version {
+        include /etc/nginx/asgi.inc;
+        proxy_pass http://asgi_upstream;
+        access_log off;
+        log_not_found off;
+    }
+
+    # -------------------------------------------------------
+    # WebSocket
+    # -------------------------------------------------------
+    location /ws/ {
+        include /etc/nginx/asgi.inc;
+        proxy_pass http://asgi_upstream;
+    }
+
+    # -------------------------------------------------------
+    # Django static files
+    # -------------------------------------------------------
+    location /static/ {
+        alias /opt/api/django/static/;
+        access_log off;
+        expires 30d;
+    }
+
+    # -------------------------------------------------------
+    # Portal SPA (served from /opt/www/portal/)
+    # -------------------------------------------------------
+    location /portal/ {
+        alias /opt/www/portal/;
+        try_files $uri $uri/ /portal/index.html;
+
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            expires 30d;
+            add_header Cache-Control "public, immutable";
+            access_log off;
+        }
+    }
+
+    # -------------------------------------------------------
+    # Homepage / static site (fallback)
+    # -------------------------------------------------------
+    location / {
+        try_files $uri $uri/ $uri.html =404;
+
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            expires 30d;
+            add_header Cache-Control "public, immutable";
+            access_log off;
+        }
+    }
+}
