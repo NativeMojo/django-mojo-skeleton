@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Dev startup script to run Uvicorn against bin/_asgi.py with project path setup
-# - Reads host/port from var/dev_server.conf (auto-generated if missing)
+# - Reads host/port from config/dev_server.conf (committed; auto-generated if missing)
 # - Ensures working dir is project root
 # - Adds bin/ to sys.path via --app-dir
 # - Optional: tries to start Redis for Channels if not already running
@@ -26,8 +26,10 @@ fi
 # Ensure var directories exist for logs, etc.
 mkdir -p "$ROOT_DIR/var/logs"
 
-# Auto-generate dev_server.conf if it doesn't exist (random port avoids collisions)
-CONF_FILE="$ROOT_DIR/var/dev_server.conf"
+# Auto-generate dev_server.conf if it doesn't exist (random port avoids collisions
+# across the many local projects). Lives under config/ (committed) so this project's
+# dev server and the testit runner — which reads config/dev_server.conf — agree.
+CONF_FILE="$ROOT_DIR/config/dev_server.conf"
 if [[ ! -f "$CONF_FILE" ]]; then
   RANDOM_PORT=$(( (RANDOM % 4801) + 5000 ))
   echo "host=localhost" > "$CONF_FILE"

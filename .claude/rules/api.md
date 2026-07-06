@@ -8,6 +8,23 @@ Reference: [mojo_model.md](https://github.com/NativeMojo/django-mojo/blob/main/d
 and [rest/permissions.md](https://github.com/NativeMojo/django-mojo/blob/main/docs/django_developer/rest/permissions.md).
 Canonical example: `apps/examples/todo/rest.py`.
 
+## Registering a New App & Its Routes
+
+Two wiring steps are mandatory when you add an app or its first endpoint. Miss either
+and the routes silently **404** — the server logs `<app> has no api routes` at startup:
+
+1. **Add the app to `apps/apps.json`** `"installed"` list (bare label for local apps,
+   e.g. `"system"`). If it's not listed, the app isn't scanned at all.
+2. **Import every route module in `<app>/rest/__init__.py`** so the `@md.*` decorators
+   actually run and register their URLs:
+   ```python
+   APP_NAME = "system"      # URL prefix (defaults to the app dir name)
+   from .update import *
+   ```
+   An **empty `rest/__init__.py` registers zero routes** even though the endpoint files
+   exist — the decorators never execute because nothing imports them. This is a common,
+   silent cause of 404s on a brand-new endpoint.
+
 ## Handlers Are Thin — Delegate to the Model
 
 The default handler routes straight to the model's auto-CRUD. Do **not** hand-write list/get/create/
