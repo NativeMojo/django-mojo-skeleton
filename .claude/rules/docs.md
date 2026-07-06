@@ -1,3 +1,7 @@
+---
+globs: docs/**/*.md
+---
+
 # Documentation Rules
 
 ## Two Doc Tracks

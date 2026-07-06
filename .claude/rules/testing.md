@@ -1,3 +1,7 @@
+---
+globs: apps/tests/**/*.py,apps/**/tests/**/*.py
+---
+
 # Testing Conventions
 
 Before writing any test, read `docs/django_developer/testit/Overview.md`. This is mandatory.

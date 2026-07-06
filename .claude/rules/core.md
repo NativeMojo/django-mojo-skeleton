@@ -1,3 +1,7 @@
+---
+globs: apps/**/*.py
+---
+
 # Core Rules
 
 These rules apply to all work in this repository. Non-negotiable.
@@ -26,8 +30,17 @@ The simplest correct solution wins. No abstractions for one-time operations. No 
 
 ## Organization
 
+See `.claude/rules/architecture.md` for the model-vs-service decision — the rule mojo projects most
+often get wrong.
+
 - **One model per file, one REST handler per file.**
-- **Domain logic in `app/services/`.** Not in models or REST handlers.
+- **Domain data is a MojoModel with RestMeta** — not a dict in a built-in's `metadata` JSON, and not
+  a hand-written serializer. Per-model logic (validation, lifecycle, serialization) lives **on the
+  model** (`set_<field>`, `on_rest_pre_save`, `GRAPHS`).
+- **`app/services/` is for orchestration only** — logic that spans multiple models or external
+  systems. It is not a substitute for creating a model, and never the home for hand-rolled
+  serialization or permission checks.
+- **REST handlers stay thin** — delegate to `Model.on_rest_request(request, pk)`.
 - For per-instance operations, prefer `POST_SAVE_ACTIONS` + `on_action_<name>` over custom endpoints.
 
 ## Framework Auto-Wrap Gotcha
