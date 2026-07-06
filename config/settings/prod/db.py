@@ -9,10 +9,10 @@
 #   DATABASE_NAME = "my_mojo_project"
 #   DATABASE_USER = "postgres"
 #   DATABASE_PASSWORD = "your-password"
-#   REDIS_HOST = "your-cache-endpoint.cache.amazonaws.com"
+#   REDIS_SERVER = "your-cache-endpoint.cache.amazonaws.com"
 #   REDIS_PORT = "6379"
 
-REDIS_SERVER = ""       # Set via var/django.conf -> REDIS_HOST
+REDIS_SERVER = ""       # Set via var/django.conf -> REDIS_SERVER
 REDIS_PORT = 6379       # Set via var/django.conf -> REDIS_PORT
 
 CACHES = {

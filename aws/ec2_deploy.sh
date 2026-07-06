@@ -24,38 +24,32 @@ if ! id www &>/dev/null; then
     exit 1
 fi
 
-# ── Project-specific Python packages ─────────────────────────────────────────
-# Add your project's extra pip packages here
-log "Installing project Python packages..."
-pip install \
-    python-magic \
-    pillow \
-    boto3 \
-    pyobjict \
-    requests \
-    ujson \
-    pyjwt \
-    pycryptodome \
-    redis \
-    pytz \
-    gevent \
-    mistune \
-    pygments \
-    django-redis-cache
+# ── Project Python packages ───────────────────────────────────────────────────
+# django-mojo (installed by ec2_bootstrap.sh) already pulls in everything a
+# typical django-mojo project needs — psycopg, uvicorn, boto3, redis, pillow,
+# etc. — as its own dependencies, so there's nothing to add here by default.
+# No venv, by design: these instances run exactly one app, so there's nothing
+# for a venv to isolate from — install any genuine project-specific extras
+# straight into system python3.12 (ec2_bootstrap.sh already isolates OS
+# tooling on its own pinned python3.9, so this is safe).
+#
+# Add your project's extra pip packages here, e.g.:
+#   pip install some-project-specific-package
 
-# ── Virtualenv ───────────────────────────────────────────────────────────────
-if [[ ! -d "${PROJ_PATH}/.venv" ]]; then
-    log "Creating virtualenv..."
-    python3 -m venv "${PROJ_PATH}/.venv"
+# ── Self-signed placeholder cert ─────────────────────────────────────────────
+# nginx refuses to start with a `listen ... ssl` block that has no
+# ssl_certificate — and certbot's --nginx plugin refuses to run against a
+# config nginx can't already parse. A snakeoil cert breaks that chicken-and-egg:
+# nginx starts fine on a fresh node, then `certbot --nginx -d yourdomain.com`
+# replaces these paths with the real cert. Skipped once a real cert exists.
+if [[ ! -f /etc/nginx/ssl/snakeoil.crt ]]; then
+    log "Generating self-signed placeholder cert..."
+    mkdir -p /etc/nginx/ssl
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout /etc/nginx/ssl/snakeoil.key \
+        -out /etc/nginx/ssl/snakeoil.crt \
+        -subj "/CN=localhost" 2>/dev/null
 fi
-
-log "Installing project deps into venv..."
-"${PROJ_PATH}/.venv/bin/pip" install --upgrade pip
-"${PROJ_PATH}/.venv/bin/pip" install \
-    django-nativemojo "psycopg[binary]" "uvicorn[standard]" \
-    redis boto3 pyobjict requests ujson pyjwt pycryptodome \
-    gevent mistune pygments django-redis-cache python-magic \
-    pillow pytz 2>&1 | tail -5
 
 # ── Nginx configuration ──────────────────────────────────────────────────────
 log "Installing nginx configs..."
@@ -100,6 +94,16 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 * * * * * ec2-user ${PROJ_PATH}/bin/jobman start >> ${PROJ_PATH}/var/logs/jobman.log 2>&1
 EOF
 
+# No-op on single-node deploys (aws/certbot_sync.py exits quietly if
+# var/ops.json is missing or AWS_CERT_BUCKET/LOAD_BALANCER_DOMAIN/
+# PRIMARY_BALANCER_HOST aren't set in it). Needs root: reads privkey.pem
+# (600) and reloads nginx.
+cat > /etc/cron.d/4_certbot_sync <<EOF
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/5 * * * * root python3 ${PROJ_PATH}/aws/certbot_sync.py >> ${PROJ_PATH}/var/logs/certbot_sync.log 2>&1
+EOF
+
 # ── Var directories ───────────────────────────────────────────────────────────
 # ec2-user owns (writes logs, pids, config), www group reads (uvicorn/nginx)
 # setgid (2xxx) ensures new files/dirs inherit the www group
@@ -115,6 +119,17 @@ log ""
 log "Remaining steps:"
 log "  1. echo 'prod' > ${PROJ_PATH}/var/profile"
 log "  2. Edit ${PROJ_PATH}/var/django.conf with DB/cache/AWS credentials"
-log "  3. ${PROJ_PATH}/.venv/bin/python ${PROJ_PATH}/bin/manage.py migrate"
-log "  4. sudo certbot --nginx -d yourdomain.com"
+log "  3. python3 ${PROJ_PATH}/bin/manage.py migrate"
+PRIMARY_HOST=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('PRIMARY_BALANCER_HOST',''))" \
+    "${PROJ_PATH}/var/ops.json" 2>/dev/null || true)
+if [[ -n "$PRIMARY_HOST" ]]; then
+    if [[ "$(hostname)" == "$PRIMARY_HOST" ]]; then
+        log "  4. sudo certbot --nginx -d yourdomain.com   (this IS the primary node — run certbot here)"
+    else
+        log "  4. Do NOT run certbot on this node — it's not PRIMARY_BALANCER_HOST ($PRIMARY_HOST)."
+        log "     aws/certbot_sync.py (cron, every 5 min) will pull the cert from S3 once the primary issues it."
+    fi
+else
+    log "  4. sudo certbot --nginx -d yourdomain.com"
+fi
 log "  5. sudo systemctl enable --now mojo-asgi"

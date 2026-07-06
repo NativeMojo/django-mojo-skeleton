@@ -119,8 +119,6 @@ dnf install -y \
     nginx ImageMagick inotify-tools \
     "python${PYTHON_VER}" "python${PYTHON_VER}-devel"
 
-sed -i '1s|^#!/usr/bin/python3$|#!/usr/bin/python3.9|' /usr/bin/dnf
-
 log "Enabling services..."
 systemctl enable --now crond.service
 systemctl enable --now rsyslog
@@ -177,23 +175,12 @@ if [[ ! -f /home/deploy/.ssh/id_ed25519 ]]; then
     chown -R deploy:deploy /home/deploy/.ssh
 fi
 
-# Generate ec2-user SSH key (for pulling the core app repo to PROJ_PATH — this
-# is the key a GitHub webhook / CI job authenticates as to auto-update /opt/api;
-# it is separate from the `deploy` user's key above, which is scoped to static
-# sites under WEB_ROOT only)
+# Also give ec2-user GitHub host key for git operations
 mkdir -p /home/ec2-user/.ssh
-if [[ ! -f /home/ec2-user/.ssh/id_ed25519 ]]; then
-    log "Generating ec2-user SSH key..."
-    ssh-keygen -t ed25519 -C "ec2-user@$(hostname -f 2>/dev/null || echo ec2)" \
-        -f /home/ec2-user/.ssh/id_ed25519 -N ""
-    chmod 600 /home/ec2-user/.ssh/id_ed25519
-    chmod 644 /home/ec2-user/.ssh/id_ed25519.pub
-fi
 if ! grep -q "github.com" /home/ec2-user/.ssh/known_hosts 2>/dev/null; then
     ssh-keyscan -t ed25519 github.com >> /home/ec2-user/.ssh/known_hosts 2>/dev/null
+    chown ec2-user:ec2-user /home/ec2-user/.ssh/known_hosts 2>/dev/null || true
 fi
-chmod 700 /home/ec2-user/.ssh
-chown -R ec2-user:ec2-user /home/ec2-user/.ssh
 
 # ── /opt/api — Django project ─────────────────────────────────────────────────
 log "Creating project directories..."
@@ -330,21 +317,6 @@ mkdir -p /var/www/certbot
 chown www:www /var/www/certbot
 
 # ── Python setup (AFTER all dnf operations) ───────────────────────────────────
-#
-# AL2023 system tools (dnf, and potentially others) shebang on the bare
-# "#!/usr/bin/python3" and depend on that resolving to the real system Python
-# 3.9, which has their C-extension bindings (e.g. dnf's own module) installed
-# for it specifically — those bindings aren't available for any other
-# interpreter and aren't pip-installable. Before remapping /usr/bin/python3 to
-# ${PYTHON_VER} below (which our own project scripts rely on), pin every
-# OS-provided script with that exact shebang to python3.9 explicitly, so they
-# keep working regardless of what /usr/bin/python3 points to afterward.
-log "Pinning OS python3 scripts to python3.9 before remapping /usr/bin/python3..."
-while IFS= read -r -d '' f; do
-    sed -i '1s|^#!/usr/bin/python3$|#!/usr/bin/python3.9|' "$f"
-    log "  pinned shebang: $f"
-done < <(grep -rlZ --binary-files=without-match '^#!/usr/bin/python3$' /usr/bin /usr/sbin /usr/libexec 2>/dev/null)
-
 log "Configuring Python ${PYTHON_VER}..."
 alternatives --install /usr/bin/python3 python3 "/usr/bin/python${PYTHON_VER}" 20
 alternatives --install /usr/bin/python  python  "/usr/bin/python${PYTHON_VER}" 20
@@ -357,6 +329,7 @@ retry bash -c "curl -fsSL https://bootstrap.pypa.io/get-pip.py | python${PYTHON_
 log "Installing base Python packages..."
 pip install \
     "psycopg[binary]" \
+    "uvicorn[standard]" \
     django-mojo \
     certbot-nginx
 
@@ -409,15 +382,10 @@ log "Directories:"
 log "  ${PROJ_PATH}     — Django project (ec2-user:www, setgid)"
 log "  ${WEB_ROOT}      — Static web root (deploy:www, setgid)"
 log ""
-log "ec2-user SSH public key (add to your CORE APP repo as a read-only deploy key):"
-log "────────────────────────────────────────────────────────"
-cat /home/ec2-user/.ssh/id_ed25519.pub 2>/dev/null || log "  (not generated)"
-log "────────────────────────────────────────────────────────"
-log ""
-log "deploy user SSH public key (add to STATIC SITE repos deployed to ${WEB_ROOT}):"
+log "Deploy SSH public key (add to GitHub repo as deploy key):"
 log "────────────────────────────────────────────────────────"
 cat /home/deploy/.ssh/id_ed25519.pub 2>/dev/null || log "  (not generated)"
 log "────────────────────────────────────────────────────────"
 log ""
-log "Next: clone your repo to ${PROJ_PATH} as ec2-user and run:"
+log "Next: clone your repo to ${PROJ_PATH} and run:"
 log "  sudo bash ${PROJ_PATH}/aws/ec2_deploy.sh"

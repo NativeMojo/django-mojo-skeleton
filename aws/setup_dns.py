@@ -24,14 +24,13 @@ GODADDY_API = "https://api.godaddy.com/v1"
 
 
 def _get_domain():
-    """Read domain from var/deploy.conf, fall back to DOMAIN env var."""
-    conf_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "var", "deploy.conf")
+    """Read domain from var/deploy.json, fall back to DOMAIN env var."""
+    conf_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "var", "deploy.json")
     if os.path.exists(conf_path):
         with open(conf_path) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("DOMAIN") and "=" in line:
-                    return line.split("=", 1)[1].strip().strip("'\"")
+            data = json.load(f)
+        if data.get("DOMAIN"):
+            return data["DOMAIN"]
     return os.environ.get("DOMAIN", "example.com")
 
 

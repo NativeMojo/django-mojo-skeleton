@@ -7,6 +7,7 @@
         "mojo.apps.incident",
         "mojo.apps.jobs",
         "mojo.apps.realtime",
+        "system",
         "django.contrib.auth",
         "django.contrib.contenttypes",
         "django.contrib.sessions",

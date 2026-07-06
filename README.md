@@ -94,7 +94,7 @@ sudo systemctl enable --now mojo-asgi
 |------|---------|
 | `ec2_bootstrap.sh` | System-level EC2 setup (curl one-liner, no repo needed) |
 | `ec2_deploy.sh` | Project-specific setup (after git clone) |
-| `post_pull.sh` | Post-deployment updates |
+| `post_deploy.sh` | Post-deployment updates |
 | `deploy.py` | AWS infrastructure provisioning (SG, RDS, ElastiCache, EC2) |
 | `nginx/` | Full nginx config with TLS, security headers, bot blocking |
 | `nginx/systemd/` | systemd service files |

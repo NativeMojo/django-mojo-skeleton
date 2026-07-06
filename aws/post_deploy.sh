@@ -1,7 +1,7 @@
 #!/bin/bash
 # Post-pull deployment — run after every git pull on EC2
 #
-# Usage: cd /opt/api && sudo bash aws/post_pull.sh
+# Usage: cd /opt/api && sudo bash aws/post_deploy.sh
 
 set -euo pipefail
 
@@ -10,20 +10,19 @@ cd "$PROJ_PATH"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
-log "Upgrading django-nativemojo..."
-pip install --upgrade django-nativemojo 2>/dev/null || true
+log "Upgrading django-mojo..."
+pip install --upgrade django-mojo 2>/dev/null || true
 
 log "Installing project dependencies..."
 pip install -r requirements.txt 2>/dev/null || true
 
 if [[ -f "${PROJ_PATH}/var/allow_migrate" ]]; then
     log "Running migrations..."
-    "${PROJ_PATH}/.venv/bin/python" "${PROJ_PATH}/bin/manage.py" migrate --noinput 2>&1 || \
-        python3 "${PROJ_PATH}/bin/manage.py" migrate --noinput 2>&1 || true
+    python3 "${PROJ_PATH}/bin/manage.py" migrate --noinput 2>&1 || true
 fi
 
 log "Collecting static files..."
-"${PROJ_PATH}/.venv/bin/python" "${PROJ_PATH}/bin/manage.py" collectstatic --noinput 2>&1 || true
+python3 "${PROJ_PATH}/bin/manage.py" collectstatic --noinput 2>&1 || true
 
 log "Updating nginx configs..."
 cp -f "${PROJ_PATH}/aws/nginx/nginx.conf" /etc/nginx/nginx.conf 2>/dev/null || true
