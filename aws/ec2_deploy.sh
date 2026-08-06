@@ -80,9 +80,29 @@ log "Installing systemd services..."
 
 REPO_SYSTEMD="${PROJ_PATH}/aws/nginx/systemd"
 if [[ -d "$REPO_SYSTEMD" ]]; then
-    cp -f "$REPO_SYSTEMD/"*.service /etc/systemd/system/
+    # Timers as well as services. Copying only *.service is why config-sync.timer
+    # sat in the repo and was never installed on any box.
+    if compgen -G "$REPO_SYSTEMD/*.service" > /dev/null; then
+        cp -f "$REPO_SYSTEMD/"*.service /etc/systemd/system/
+    fi
+    if compgen -G "$REPO_SYSTEMD/*.timer" > /dev/null; then
+        cp -f "$REPO_SYSTEMD/"*.timer /etc/systemd/system/
+    fi
     systemctl daemon-reload
-    log "Systemd services installed (enable after configuring var/django.conf)."
+
+    # Timers get enabled here; services do not. A service like mojo-asgi cannot
+    # start before var/django.conf exists, so it waits for the operator. The
+    # sync timers are the opposite — they are what FETCHES django.conf, and each
+    # no-ops harmlessly when unconfigured. Leaving them disabled means a fresh
+    # node never converges while looking fully installed.
+    for unit in "$REPO_SYSTEMD/"*.timer; do
+        [[ -e "$unit" ]] || continue
+        name="$(basename "$unit")"
+        systemctl enable --now "$name"
+        log "  enabled $name"
+    done
+
+    log "Systemd units installed (services enable after configuring var/django.conf)."
 fi
 
 # ── Project cron jobs ───────────────────────────────────��────────────────────
