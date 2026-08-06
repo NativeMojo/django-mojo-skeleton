@@ -53,18 +53,48 @@ resource "aws_instance" "node" {
     delete_on_termination = true
   }
 
-  # Hostname only. Everything else about the box comes from the AMI or from
-  # aws/ec2_bootstrap.sh — provisioning logic does not belong in Terraform,
+  # Identity and swap only. Everything else about the box comes from the AMI or
+  # from aws/ec2_bootstrap.sh — provisioning logic does not belong in Terraform,
   # which has no good way to re-run it.
+  #
+  # The hostname is not cosmetic: certbot_sync.py compares it against
+  # PRIMARY_BALANCER_HOST to decide whether this node publishes the certificate
+  # lineage or pulls it. A node that boots unnamed does the wrong one.
+  #
+  # This runs via cloud-init's scripts-user module, which means cloud-init has
+  # to actually work in the AMI. It is worth verifying rather than assuming:
+  # remapping /usr/bin/python3 to a newer interpreter breaks cloud-init, whose
+  # module is installed only for the distro's original Python, and the failure
+  # is silent until first boot. `cloud-init status` on the AMI source should say
+  # "done", not raise.
   user_data = <<-EOT
     #!/bin/bash
     set -euo pipefail
+
     hostnamectl set-hostname ${local.hostnames[count.index]}
     echo "${local.hostnames[count.index]}" > /etc/hostname
     sed -i "s/^127.0.0.1.*/127.0.0.1   localhost ${local.hostnames[count.index]}/" /etc/hosts
-    if [ -f /etc/cloud/cloud.cfg ]; then
-      sed -i 's/preserve_hostname: false/preserve_hostname: true/' /etc/cloud/cloud.cfg
+
+    # Swap. Small instances run close enough to their memory ceiling that a
+    # traffic spike or a big query turns into the OOM killer reaping uvicorn
+    # rather than a slow request. Guarded so re-running is a no-op.
+    if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
+      if [ ! -f /swapfile ]; then
+        fallocate -l ${var.swap_gb}G /swapfile || \
+          dd if=/dev/zero of=/swapfile bs=1M count=$((${var.swap_gb} * 1024))
+      fi
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
     fi
+    grep -qxF '/swapfile none swap sw 0 0' /etc/fstab || \
+      echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+    # Prefer reclaiming page cache over swapping anonymous memory. The swapfile
+    # is an OOM backstop, not somewhere the working set should live.
+    sysctl -w vm.swappiness=10
+    grep -qxF 'vm.swappiness=10' /etc/sysctl.d/99-swap.conf 2>/dev/null || \
+      echo 'vm.swappiness=10' > /etc/sysctl.d/99-swap.conf
   EOT
 
   # The AMI is pinned deliberately (see variables.tf); changing it should be a

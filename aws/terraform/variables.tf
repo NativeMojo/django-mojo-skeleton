@@ -286,3 +286,13 @@ variable "log_retention_days" {
   type        = number
   default     = 90
 }
+
+variable "swap_gb" {
+  description = <<-EOT
+    Swapfile size in GB on each node. A backstop against the OOM killer reaping
+    uvicorn on a small instance, not somewhere the working set should live —
+    user-data also sets vm.swappiness=10.
+  EOT
+  type        = number
+  default     = 1
+}

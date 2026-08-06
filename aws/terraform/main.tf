@@ -101,6 +101,7 @@ module "nodes" {
   node_volume_gb    = var.node_volume_gb
   ssh_key_name      = var.ssh_key_name
   gatekeeper_index  = var.gatekeeper_index
+  swap_gb           = var.swap_gb
   public_subnet_ids = module.network.public_subnet_ids
   node_sg_id        = module.network.node_sg_id
 }

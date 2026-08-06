@@ -8,3 +8,9 @@ variable "ssh_key_name" { type = string }
 variable "gatekeeper_index" { type = number }
 variable "public_subnet_ids" { type = list(string) }
 variable "node_sg_id" { type = string }
+
+variable "swap_gb" {
+  description = "Swapfile size in GB, created by user-data."
+  type        = number
+  default     = 1
+}
