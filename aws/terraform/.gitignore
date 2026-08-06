@@ -11,11 +11,19 @@
 *.tfplan
 *.plan.bin
 
-# Real environment configs. envs/example.*.tfvars are templates and ARE tracked;
-# a concrete <project>.<env>.tfvars carries account-specific detail, so keep it
-# out unless you have looked at what is in it.
-envs/*.tfvars
-!envs/example.*.tfvars
+# envs/*.tfvars ARE COMMITTED, deliberately. A project's .tfvars IS its
+# infrastructure definition — region, sizes, node counts, which AMI. Keeping it
+# out of git would mean the one file describing what this environment actually
+# is exists only on somebody's laptop, which defeats the point of writing the
+# infrastructure down at all.
+#
+# It holds no secrets: project name, region, size preset, an SSH key NAME, an
+# alerting email. Anything genuinely secret does not belong here — generated
+# passwords live in the state file (S3, never committed) and application
+# secrets live in the config bucket.
+#
+# If you find yourself wanting to put a credential in a .tfvars, that is the
+# signal it belongs somewhere else, not the signal to gitignore this.
 
 # The lock file IS normally committed to pin provider versions. It is ignored
 # here because this is a skeleton: a project generates its own on first init
