@@ -430,6 +430,95 @@ depend on where in the minute a node happens to arrive.
 
 ---
 
+## 3.8 dnsman may delete most of §3.6 — investigate before building it
+
+`certbot_sync.py`'s own docstring names dnsman's Certificate model as its
+endgame. On inspection that is not aspirational — **dnsman is built**, and it
+attacks the certificate problem from an angle that removes the gatekeeper rather
+than improving it.
+
+What exists in `mojo/apps/dnsman/`:
+
+- `services/certs.py` — full ACME issuance, renewal and revocation, and its
+  opening line is decisive: *"DNS-01 is the only challenge type dnsman uses,
+  because it needs nothing but an [API credential]... That is what lets issuance
+  and renewal run centrally on a worker."*
+- `models/certificate.py` — `Certificate(KSMSecrets, MojoModel)` holding
+  `cert_pem`, `chain_pem`, and the private key in **KMS-backed secrets**, with
+  `not_after` / `renew_after` for scheduling.
+- `models/acme_account.py` — one account per directory URL, key in KMS, no REST
+  surface.
+- `asyncjobs.certificate_updated` — broadcast to **every runner** on
+  `DNSMAN_CERT_SYNC_CHANNEL` when a certificate changes, carrying identifiers
+  only; consumers pull the material through a gated endpoint with their own
+  credentials.
+- Wildcard support (`normalize_names` defaults to apex plus wildcard), and
+  Route53 + GoDaddy providers.
+
+**What this deletes, if adopted.** DNS-01 needs no port 80 at all, so:
+
+| §3.6 work item | Under dnsman |
+|---|---|
+| port-80 `certbot-targets` group + gatekeeper role for certs | **gone** — no HTTP-01 challenge to route |
+| multi-lineage S3 sync (nine lineages) | **gone** — DB is the single source |
+| renewal-config replication | **gone** |
+| ACME account key replication, and its revocation-credential tradeoff | **gone** — one account, in KMS, never on a node |
+| S3 release manifest atomicity for certs | **gone** — a row is atomic |
+| tenant offboarding (unhandled today) | delete the row |
+| `PRIMARY_BALANCER_HOST` | **gone** |
+
+That is the majority of the most complex section of this plan, removed rather
+than built.
+
+**What dnsman does not provide:** the node-side installer. The docstring is
+explicit — *"dnsman itself has nothing to install, so the framework handler only
+logs."* Something must still write PEMs to disk, `nginx -t`, and reload. That is
+`certbot_sync.py`'s job, but a much smaller version of it: pull one cert from a
+REST endpoint, install, reload. No S3, no direction, no primary/replica, no
+account key.
+
+### The blocking constraint, stated plainly
+
+**DNS-01 requires API control of the zone**, and dnsman has **no CNAME-delegation
+support** — verified: nothing in `services/certs.py` or `models/domain.py`
+handles a delegated `_acme-challenge`. So today it can only issue for zones we
+hold Route53 or GoDaddy credentials for.
+
+That is a real problem for exactly our use case:
+
+- **Our own domains** — works, *if* we have API access to the zone. It has been
+  stated that GoDaddy API access is not held for every project, including this
+  one. That is the first thing to check.
+- **Tenant BYO domains (joecasino.xyz)** — does **not** work. The tenant controls
+  their DNS; we cannot write their `_acme-challenge` TXT.
+
+**Proposed phasing rather than a single decision:**
+
+1. **Now — adopt dnsman for our own domains with a wildcard.** A single
+   `*.wmwx.io` + `wmwx.io` certificate replaces eight of the current nine
+   lineages. The multi-lineage sync problem shrinks from nine moving parts to
+   one wildcard plus N tenant domains, which is a large reduction in §3.6 before
+   writing any of it. Requires DNS API access to the `wmwx.io` zone.
+2. **Next — add CNAME delegation to dnsman.** The tenant adds one permanent
+   `_acme-challenge.joecasino.xyz CNAME <something>.acme.wmwx.io`; we own the
+   target zone and answer every future challenge without touching their DNS
+   again. This is a contained feature and it is what makes dnsman viable for a
+   multi-tenant platform.
+3. **Then — retire certbot, the port-80 target group, and the gatekeeper role**
+   for certificates entirely.
+
+**Intellectual honesty about ACM.** Step 2 asks tenants for a permanent CNAME —
+which is the same operational burden §6 rejects ACM over. If we are willing to
+ask for that record, ACM becomes more competitive than §6 admits. dnsman still
+wins on two counts that ACM cannot match: TLS stays terminated on the node so we
+keep TCP passthrough, and there is no per-balancer certificate quota to keep
+renegotiating. But the CNAME burden should stop being an argument against ACM if
+we adopt it ourselves.
+
+**Recommendation: do not build the §3.6 multi-lineage S3 sync until step 1 is
+evaluated.** It is the largest work item in this plan and dnsman may remove most
+of its justification. The wildcard alone changes the shape of the problem.
+
 ## 4. The gatekeeper
 
 **Still recommending against automatic failover**, for reasons v1 gave and the
