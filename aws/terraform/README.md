@@ -1,0 +1,150 @@
+# AWS environments
+
+OpenTofu/Terraform for a django-mojo project's AWS footprint. One state file per
+environment; a new environment should be a new `.tfvars` and nothing else.
+
+Written against OpenTofu 1.12 and the AWS provider 5.x. HCL is identical for
+HashiCorp Terraform ≥1.5 — substitute `terraform` for `tofu` throughout.
+
+## The topology
+
+```
+tenant DNS  ──A──▶  NLB Elastic IPs (static, one per AZ)
+                     │
+                     ├── :443 TCP ──▶ <project>-<env>-api-servers   every node
+                     └── :80  TCP ──▶ <project>-<env>-certbot-targets  ONE node
+                                                    │
+  node (identical, N of them, public subnet)  ◀─────┘
+    nginx :80/:443 ── vhost by Host header ──▶ unix:/opt/api/var/asgi.sock
+                     each node terminates TLS with its own copy of the lineage
+
+  private subnets: Aurora PostgreSQL (encrypted, writer + reader)
+                   ElastiCache Valkey (encrypted, automatic failover)
+```
+
+Three decisions are load-bearing and worth understanding before changing
+anything.
+
+**NLB, not ALB.** An ALB has no static IP — only a DNS name. Tenants bringing
+their own domain would have to CNAME to it, which an apex domain cannot do
+unless their DNS provider supports ALIAS records, and most do not. An NLB
+carries Elastic IPs, so tenant onboarding stays "add an A record". The cost is
+no host/path routing and no WAF; neither is needed here, because the nodes are
+identical and nginx already routes by `Host`.
+
+**TCP passthrough, not TLS termination at the balancer.** Each node terminates
+TLS itself with a Let's Encrypt lineage. That avoids ACM's 25-certificates-per
+-balancer quota, which is a real ceiling for a platform where every tenant
+brings a domain, and it avoids requiring each tenant to add a validation CNAME
+that must survive forever or renewals silently stop. Passthrough also preserves
+the client source IP to the instance and carries WebSocket and MCP streaming
+traffic with no L7 proxy in the path to buffer or time it out.
+
+**Port 80 points at exactly one node.** Let's Encrypt fetches the HTTP-01
+challenge over port 80. Behind a balancer that fetch lands on whichever node is
+picked, but certbot wrote the challenge file on only one — so with N nodes in
+the port-80 pool, most validations fail, intermittently and per domain. Pointing
+:80 at one node makes it the sole ACME endpoint; `aws/certbot_sync.py`
+distributes the issued lineage to the rest via S3.
+
+> **The one thing that must agree in two places.** `gatekeeper_index` selects
+> which node sits in `certbot-targets`, and `PRIMARY_BALANCER_HOST` in
+> `var/django.conf` tells `certbot_sync.py` which node publishes rather than
+> pulls. If they name different hosts, the node receiving challenges decides it
+> is a replica and never publishes — certificates stop renewing with nothing
+> visibly broken until they expire. `tofu output primary_balancer_host` is the
+> value to copy.
+
+## Standing up an environment
+
+```bash
+# once per AWS account — creates the state bucket and lock table
+./bootstrap.sh --region us-east-1
+
+# once per environment
+tofu init \
+  -backend-config=bucket=mojo-tfstate-<account-id> \
+  -backend-config=key=<project>/<env>.tfstate \
+  -backend-config=region=<region> \
+  -backend-config=dynamodb_table=mojo-tfstate-lock
+
+cp envs/example.prod.tfvars envs/<project>.prod.tfvars
+$EDITOR envs/<project>.prod.tfvars
+
+tofu plan  -var-file=envs/<project>.prod.tfvars
+tofu apply -var-file=envs/<project>.prod.tfvars
+```
+
+Then wire the application:
+
+```bash
+tofu output -raw django_conf_fragment   # paste into var/django.conf
+tofu output -raw db_password            # the generated Aurora password
+tofu output point_dns_at                # A records for every hostname
+tofu output primary_balancer_host       # must equal PRIMARY_BALANCER_HOST
+```
+
+Finally, verify against the reference topology:
+
+```bash
+./aws/check_setup.py --profile <env>
+```
+
+`check_setup.py` is deliberately independent of Terraform. Terraform checks
+reality against *its own intent*; `check_setup.py` checks reality against the
+topology this README describes. They catch different things — a resource nobody
+put in Terraform is invisible to `tofu plan` and obvious to the audit.
+
+## Environments
+
+Two examples ship here.
+
+`example.staging.tfvars` — single node, no balancer, no reader, no failover,
+7-day backups, CloudTrail and GuardDuty off. Staging exists to test the
+software, so it does not pay for infrastructure it is not testing.
+
+`example.prod.tfvars` — NLB across two AZs, two nodes, Aurora writer + reader,
+cache with a replica, 35-day backups, CloudTrail and GuardDuty on.
+
+Convention: **staging and production live in separate AWS accounts**, staging in
+us-west-2 and production in us-east-1. Separate accounts give a hard blast-radius
+boundary — a staging credential cannot reach production, no policy needed — plus
+clean per-environment billing.
+
+Because staging has no balancer, the multi-node `certbot_sync.py` path is never
+exercised there. It is worth adding a second staging node for an afternoon once,
+confirming a replica pulls the lineage and serves TLS with it, then destroying
+it. That is the one component that is both new and load-bearing, and it
+otherwise gets its first real run in production.
+
+## What is deliberately not here
+
+**Provisioning.** Terraform creates instances and sets their hostname; the
+software on them comes from the AMI or from `aws/ec2_bootstrap.sh`. Terraform has
+no good story for re-running provisioning logic, so it does not own any.
+
+**Instance profiles.** No IAM role is attached to the nodes. The fileman S3
+backend currently requires explicit credentials and cannot use an ambient
+credential chain, so a role would not be usable — see the django-mojo board item
+on ambient credentials + AssumeRole. Once that lands, add a role here and drop
+`AWS_KEY`/`AWS_SECRET` from `django.conf`.
+
+**Certificates.** Issuance and renewal live entirely on the gatekeeper node with
+certbot, and distribution in `aws/certbot_sync.py`. Adding a tenant domain is
+`certbot --nginx -d <domain>` plus an nginx vhost — deliberately not a
+`tofu apply`, so onboarding never touches infrastructure state.
+
+**Autoscaling.** Nodes are individual instances, not an ASG. They hold a
+certificate lineage and a certbot role, so they are not disposable yet. Revisit
+once certificates leave the boxes.
+
+## Gotchas found the hard way
+
+- **Security group rule descriptions are charset-restricted.** Em dashes and
+  other punctuation used freely in comments fail at apply with a regex error.
+  Keep them plain ASCII.
+- **`for_each` keys must be known at plan time.** Conditioning a `for_each` on
+  something derived from a not-yet-created resource fails the plan; pass a plain
+  input instead. `enable_lb_alarms` exists for exactly this reason.
+- **`tofu validate` is not `tofu plan`.** Validate checks syntax and schema and
+  passed cleanly on both of the above. Always plan before believing a change.

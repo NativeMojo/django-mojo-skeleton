@@ -1,0 +1,23 @@
+# Provider plugins and the local backend scaffold — re-created by `tofu init`.
+.terraform/
+
+# State. It lives in S3 (see bootstrap.sh); a local copy here means someone ran
+# without the backend configured, and it contains generated passwords.
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+
+# Saved plans — binary, environment-specific, and can embed sensitive values.
+*.tfplan
+*.plan.bin
+
+# Real environment configs. envs/example.*.tfvars are templates and ARE tracked;
+# a concrete <project>.<env>.tfvars carries account-specific detail, so keep it
+# out unless you have looked at what is in it.
+envs/*.tfvars
+!envs/example.*.tfvars
+
+# The lock file IS normally committed to pin provider versions. It is ignored
+# here because this is a skeleton: a project generates its own on first init
+# for the platform it actually runs on.
+.terraform.lock.hcl

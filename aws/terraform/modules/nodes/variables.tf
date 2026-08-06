@@ -1,0 +1,10 @@
+variable "project" { type = string }
+variable "env" { type = string }
+variable "node_count" { type = number }
+variable "node_type" { type = string }
+variable "node_ami" { type = string }
+variable "node_volume_gb" { type = number }
+variable "ssh_key_name" { type = string }
+variable "gatekeeper_index" { type = number }
+variable "public_subnet_ids" { type = list(string) }
+variable "node_sg_id" { type = string }
