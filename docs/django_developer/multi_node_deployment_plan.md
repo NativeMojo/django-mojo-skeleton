@@ -1,19 +1,43 @@
-# Multi-node deployment — proposed design
+# Multi-node deployment — proposed design (v2)
 
-**Status:** proposal, not built. Seeking review before implementation.
+**Status:** proposal, not built. Revised after external review.
 **Date:** 2026-08-06
 **Scope:** django-mojo-skeleton (and every project cloned from it)
 
 ---
 
+## 0. What changed in v2, and what the review got right
+
+The first draft was reviewed and found not implementation-ready. Every finding
+was verified against the code; **all nine were correct**, and three were worse
+than reported. Summary of what changed:
+
+| v1 said | Reality | v2 |
+|---|---|---|
+| Timers guarantee convergence for every payload | API code had no timer path at all — job-only | §3.4 adds a release-pointer sync on a timer |
+| Sequenced restarts give zero downtime | Nodes stay registered during restart; the NLB serves 502s until health checks notice | §3.5 defines an explicit drain → deploy → verify → re-register cycle |
+| Certs + `conf.d` ship "as one payload" | Logically, not transactionally. Per-object S3 writes expose mixed state | §3.6 release manifests + atomic pointer switch |
+| Publishing in order is enough coordination | Two overlapping pushes interleave | §3.5 fleet lease + immutable release SHA |
+| Gatekeeper runs migrations | A convention, not a lock — and `post_deploy.sh` hides migration failure with `\|\| true` | §3.7 separate phase, advisory lock, fail hard |
+| `config_sync.py` "built and verified" | The script was verified. **Nothing installs or enables it.** | §2.1 corrected; §8 current-state defects |
+| Gatekeeper failover = one target-group edit | `certbot_sync.py` syncs **one** lineage; wmx has **nine**, plus renewal configs and an ACME account key that are never synced | §3.6 and §4 substantially rewritten |
+| ACM capped at 25 certs — "a hard ceiling" | **Wrong, and we had the correct data.** The quota query run during this work returned `Adjustable: True`. | §6 corrected |
+| Onboarding: vhost → certbot → DNS | Self-contradictory; the next paragraph said DNS must come first | §3.6 reordered, and switched to `certonly --webroot` |
+
+The ACM error is worth calling out separately: it was not a judgement call that
+went the wrong way, it was a factual claim contradicted by a command run earlier
+in the same work. The rejection of ACM may still be correct, but §6 now argues
+it on the actual tradeoff rather than on an invented limit.
+
+---
+
 ## 1. What problem this solves
 
-Today a django-mojo project runs on **one EC2 box**. Deploying means SSH to that
-box, `git pull`, restart. That works and is simple.
+Today a django-mojo project runs on **one EC2 box**. Deploying means SSH in,
+`git pull`, restart.
 
-We are moving to **2–6 identical nodes behind a network load balancer**. The
-moment there is more than one node, "SSH in and pull" stops working, and four
-separate things need to reach every node:
+We are moving to **2–6 identical nodes behind a network load balancer**. Four
+separate things then need to reach every node:
 
 | # | Payload | Example of it changing |
 |---|---|---|
@@ -22,11 +46,9 @@ separate things need to reach every node:
 | 3 | **Static website builds** (`/opt/www/<project>`) | a web dev pushes to main |
 | 4 | **API code** (`/opt/api`) | we ship a feature |
 
-This document proposes one coherent way to handle all four, without downtime.
+### The topology
 
-### The topology being deployed onto
-
-Assumed throughout, and already built in `aws/terraform/`:
+Already built in `aws/terraform/`:
 
 ```
 tenant DNS ──A──▶ NLB static IPs
@@ -36,14 +58,11 @@ tenant DNS ──A──▶ NLB static IPs
                                      "the gatekeeper"
 
 each node: nginx (terminates TLS) ──▶ uvicorn ──▶ Aurora + Valkey
-           all nodes identical, built from one AMI
 ```
 
 The load balancer passes TCP through without decrypting, so **each node holds
-its own copy of the TLS certificates**. Port 80 is pointed at exactly one node
-so that Let's Encrypt's HTTP-01 challenge always lands where certbot is running;
-that node then distributes the certificate to the others. We call it the
-**gatekeeper**.
+its own copy of every TLS certificate**. Port 80 reaches one node so HTTP-01
+challenges always land where certbot runs.
 
 ---
 
@@ -51,182 +70,257 @@ that node then distributes the certificate to the others. We call it the
 
 > **Timers guarantee that nodes converge. Jobs only make it faster.**
 
-Every payload lands on every node via a small script on a **systemd timer** that
-pulls from S3 (or git) and installs if changed. That is the substrate, and it is
-what actually guarantees correctness.
+Every payload lands via a small script on a **systemd timer** that pulls and
+installs if changed. That is what guarantees correctness. django-mojo's job
+engine can *additionally* fire a message telling a node to run that sync now, so
+a deploy takes seconds rather than a poll interval — but the job carries no
+payload and does no work. It only says "check now."
 
-django-mojo's job engine can *additionally* fire a message telling nodes to run
-that sync **right now**, so a deploy is seconds rather than up to a poll
-interval. But the job carries no payload and does no work — it only says "check
-now."
+**Why the job engine must never be responsible for deployment:**
 
-**Why the job engine must not be responsible for deployment:**
+1. It is part of the thing being deployed. Ship broken code through it and you
+   have broken the mechanism that ships the fix.
+2. A node whose app is down cannot receive a job — precisely the node that most
+   needs to converge.
+3. A newly booted node has no code yet, so it cannot run an engine to fetch
+   code.
 
-1. **It is part of the thing being deployed.** Ship broken API code through the
-   job engine and you have broken the mechanism that ships the fix.
-2. **A node whose app is down cannot receive a job.** That is precisely the node
-   that most needs to converge. A timer keeps trying; a push does not.
-3. **A newly booted node has no code yet**, so it cannot run a job engine to
-   fetch code. Pull works at boot; push cannot.
+### 2.1 This principle is currently violated in two places
 
-If we get this backwards, the failure mode is a node that silently stops
-updating and nobody notices until it serves something stale.
+Stated as a correction, because v1 claimed otherwise:
+
+- **API code has no timer path.** Proposed as job-only. Fixed in §3.4.
+- **`config_sync.py` has no installer.** `ec2_deploy.sh:83` and
+  `post_deploy.sh:35` copy `*.service` only — `config-sync.timer` is never
+  copied, and neither unit is ever enabled. The script is verified; its
+  *installation* is not built. Fixed in §8.
 
 ---
 
-## 3. Proposed design, payload by payload
+## 3. Proposed design
 
-The unifying idea: **each payload has exactly one writer**, and the direction of
-travel follows from who that writer is.
+Unifying idea: **each payload has exactly one writer**, and every payload is
+identified by an **immutable release id** so a node can answer "am I on the
+intended release?" rather than "did I receive the message?"
 
-| Payload | Who owns it | Direction | Mechanism |
+| Payload | Owner | Direction | Mechanism |
 |---|---|---|---|
-| `django.conf` | an operator | S3 → every node | `config_sync.py` ✅ built |
-| nginx `conf.d` + certs | **the gatekeeper** | gatekeeper → S3 → other nodes | extend `certbot_sync.py` |
-| `/opt/www/<project>` | CI (GitHub Actions) | CI → S3 → every node | `www_sync.py` (new) |
-| API code | git `origin/main` | git → every node | sequenced deploy job |
+| `django.conf` | an operator | S3 → every node | `config_sync.py` (script done, installer missing) |
+| nginx `conf.d` + certs | the gatekeeper | gatekeeper → S3 → other nodes | `certbot_sync.py` — needs multi-lineage rewrite |
+| `/opt/www/<project>` | CI | CI → S3 → every node | `www_sync.py` (new) |
+| API code | a release artifact | S3 → every node | `api_sync.py` (new) + rollout controller |
 
-### 3.1 Application config — built
+### 3.1 The release-artifact model
 
-`config_sync.py` pulls `django.conf` from S3 on a timer and at boot.
-
-The important safety property: **if the fetch fails, keep the existing file.** A
-node with stale config still serves; a node with no config does not start.
-
-Secrets note: reading S3 needs credentials, so one small bootstrap credential
-still lives on each node. That is not zero, but it is much better than baking
-every secret into the AMI — the remaining key is scoped read-only to a single S3
-prefix, and every *other* secret becomes rotatable with an upload. When nodes can
-carry an IAM instance profile, that last credential disappears.
-
-### 3.2 nginx vhosts and certificates — extend `certbot_sync.py`
-
-**Why these travel together, and why the gatekeeper owns them.**
-
-`certbot --nginx` *edits vhost files in place* on whichever node runs it — our
-existing vhosts carry `# managed by Certbot` comments. So the gatekeeper is
-already the authority for `conf.d`, whether we plan for it or not. If we also
-published `conf.d` from a hand-managed S3 prefix, there would be two writers
-fighting on every renewal.
-
-They must also move **as one payload**, because a vhost referencing
-`/etc/letsencrypt/live/<domain>/fullchain.pem` fails `nginx -t` on any node that
-has not yet received that certificate. Shipping them together means one
-`nginx -t` and one reload, instead of two mechanisms racing.
-
-**Onboarding a new tenant domain then looks like this:**
+Everything except config uses the same shape, so there is one idea to learn:
 
 ```
-On the gatekeeper:
-  1. write /etc/nginx/conf.d/joecasino.xyz.conf
-  2. certbot --nginx -d joecasino.xyz
-  3. tenant points joecasino.xyz A ──▶ the NLB's static IPs
-
-Automatically, within a minute:
-  gatekeeper publishes certs + conf.d to S3
-  other nodes pull both, run nginx -t, reload
+s3://<bucket>/<payload>/<project>/<env>/
+    releases/
+        <release-id>/          immutable; never rewritten
+            manifest.json      { files: {path: sha256}, release_id, created }
+            ...content...
+    current                    a tiny object holding one release-id
 ```
 
-No SSH to other nodes. No infrastructure change. **DNS must point at the NLB
-before step 2**, or the challenge cannot reach the gatekeeper.
+**Publish** writes the release directory first, then overwrites `current` last.
+**Consume** reads `current`, and if it differs from the installed release id,
+stages the whole release to a scratch directory, verifies every file against the
+manifest, and only then swaps it in.
 
-### 3.3 Website builds — `www_sync.py` (new)
+This is what makes "ships as one payload" true rather than aspirational. A
+consumer never sees a half-written release, because `current` does not point at
+one until it is complete.
 
-Each web project's GitHub Action currently rsyncs to one box. With N nodes, the
-natural instinct is to loop over a node list — but that list goes stale, a node
-that is down during a deploy is silently skipped, and a *new* node serves 404s
-until the next deploy.
+**On disk**, the same discipline:
 
-**Invert it.** CI syncs the build to `s3://<bucket>/www/<project>/`. Each node
-pulls on a short timer. CI never needs to know how many nodes exist, a node that
-was down catches up when it returns, and a new node populates itself at boot —
-which is what makes AMI-based scaling actually work.
+```
+/opt/www/<project>/
+    releases/<release-id>/     staged, verified
+    current -> releases/<id>   atomic symlink swap (rename(2))
+```
 
-### 3.4 API code — sequenced deploy job
+Keep the last few releases so rollback is repointing a symlink.
 
-Code already arrives by `git pull` with deploy keys, which is fine and we would
-not change it. What is missing is **sequencing** and **migrations**.
+### 3.2 Application config
 
-**Sequencing.** django-mojo's job engine already supports box-direct channels:
-a channel named `<hostname>-engine` is consumed by exactly that node
-(`mojo/apps/jobs/__init__.py:101`). So a rolling deploy is simply: publish to
-node 1, wait for it to report done, publish to node 2, and so on. **Ordered
-rollout with no new locking primitive** — no Redis semaphore, no leader
-election. The sequence is just the order we publish in.
+`config_sync.py` (built) pulls `django.conf` from S3 on a timer and at boot.
+Safety property already implemented: **if the fetch fails, keep the existing
+file** — a node with stale config serves; a node with no config does not start.
 
-**Migrations — the genuinely hard part.** With N nodes,
-`./bin/manage.py migrate` must run **exactly once**, and must finish before any
-node runs code that depends on it. This is not solved by orchestration; it is a
-discipline:
+Config is small and single-file, so it uses a published `sha256` rather than the
+full release-directory machinery. **Outstanding:** install and enable the units
+(§8), and decide whether a config change should trigger a restart via the §3.5
+rollout rather than the current hostname-jitter (it should — jitter spreads
+restarts but does not guarantee non-overlap).
 
-1. One designated node (the gatekeeper) runs `migrate` before the rolling
-   restart begins.
-2. Migrations must be **expand/contract**: add nullable columns and new tables
-   in the release *before* the code that uses them; drop them in the release
-   *after* the code that stopped using them. Never rename or drop a column in
-   the same deploy that changes the code using it.
+### 3.3 Website builds
 
-Without (2) there is always a window where old code meets a new schema — and a
-rolling deploy guarantees that window exists. This constrains how migrations are
-*written*, not just how they are run, so it belongs in the project's model
-conventions as a standing rule.
+CI syncs the build to a release directory and updates `current`. Each node polls
+(~30s), stages, verifies against the manifest, and swaps the symlink.
+
+Inverting the direction — nodes pull, CI does not push — is what makes this work
+at N nodes: CI needs no node inventory, a node that was down catches up, and a
+**new node populates itself at boot**, which is what makes AMI-based scaling
+real.
+
+### 3.4 API code
+
+**Corrected from v1.** Two independent paths, and the timer is the one that
+guarantees convergence:
+
+- **`api_sync.py` on a timer + at boot.** Reads the published release id,
+  compares to what is installed, and if it differs, requests a rollout slot
+  (§3.5). A node that missed a message, booted from an old AMI, or had its job
+  engine stopped converges on its own.
+- **A box-direct job** (`<hostname>-engine`, already supported —
+  `mojo/apps/jobs/__init__.py:101`) that starts `api_sync` immediately.
+
+**Deploy an immutable id, never a branch.** `git pull origin/main` means two
+nodes in the same rollout can land on different commits if someone pushes
+mid-deploy. Either publish an S3 artifact built once in CI (preferred — it also
+removes a GitHub dependency from every node's boot path), or at minimum pin and
+deploy an exact SHA. Deploying `origin/main` should be prohibited.
+
+### 3.5 The rollout — how zero downtime is actually achieved
+
+**Corrected from v1**, which wrongly assumed sequencing was sufficient.
+Restarting `mojo-asgi` while the node is still registered means the NLB keeps
+sending traffic until health checks notice — with a 10s interval and a threshold
+of 2, that is ~20s of 502s per node.
+
+A **rollout controller** holds a fleet-wide lease and walks nodes one at a time:
+
+```
+acquire fleet lease (Redis, TTL'd)        -- refuse to start if another rollout holds it
+run the migration phase (§3.7)            -- once, before any node takes new code
+for each node, one at a time:
+    deregister from the :443 target group
+    wait for connection draining to complete
+    install the release (staged, verified, symlink swap)
+    restart mojo-asgi
+    smoke test LOCALLY (GET /api/version on 127.0.0.1)   -- fail fast, before re-exposing
+    re-register
+    wait until the target reports healthy
+    on failure: stop the rollout, leave remaining nodes on the old release
+release lease
+```
+
+Two things this buys beyond ordering: **at most one node is ever out**, and a
+failed node **halts** the rollout instead of the sequencer marching on. The lease
+is what prevents two pushes seconds apart from starting two interleaved
+rollouts.
+
+Deregistration requires an AWS API call, so the rollout controller needs
+credentials the sync scripts do not.
+
+### 3.6 nginx vhosts and certificates — bigger than v1 assumed
+
+**This is the section the review changed most.**
+
+`certbot_sync.py` handles a **single** lineage named by `LOAD_BALANCER_DOMAIN`
+(`certbot_sync.py:482`). The wmx box currently has **nine** lineages. It also
+never syncs `/etc/letsencrypt/renewal/*.conf` (nine files) or the ACME account
+key under `/etc/letsencrypt/accounts/`.
+
+So v1's claim — that the gatekeeper publishes tenant certificates and replicas
+pull them — **is not something the current script can do.** For a multi-tenant
+platform this is the largest single gap in the plan.
+
+What is actually needed:
+
+- Sync **every** lineage under `/etc/letsencrypt/live/`, not one named domain.
+- Sync **renewal configs**, or a replacement gatekeeper cannot renew anything.
+- Decide on the **ACME account key** (below).
+- Carry `conf.d` in the same release, so a vhost and the certificate it
+  references land together and get one `nginx -t` and one reload. Ship them
+  separately and a vhost arrives referencing a certificate the node does not
+  have; `nginx -t` fails and the node stalls on old config until the next tick.
+
+**The ACME account key is a real decision.** Replicating it lets any node take
+over renewal immediately; it also means every node holds a credential that can
+revoke certificates. Not replicating it means a replacement gatekeeper must
+re-register and reissue — fine for nine domains, but at tenant scale that runs
+into Let's Encrypt rate limits (50 certificates per registered domain per week,
+300 new orders per 3 hours). **Recommendation: replicate it.** Replica nodes
+already receive every private key, so the trust boundary is unchanged, and
+reissuance-on-failover does not scale.
+
+**Tenant onboarding, corrected order** (v1 had DNS after certbot, contradicting
+its own next paragraph):
+
+```
+1. tenant points joecasino.xyz A ──▶ the NLB's static IPs
+2. verify the name resolves to every NLB address
+3. on the gatekeeper: certbot certonly --webroot -d joecasino.xyz
+4. add the TLS vhost to conf.d and publish the release
+5. all nodes pull certs + vhost together, nginx -t, reload
+```
+
+Using `certonly --webroot` rather than `--nginx` matters: it obtains the
+certificate **without** writing a vhost that references files not yet present,
+so `nginx -t` is never asked to validate a config pointing at a missing
+certificate. It also removes certbot as a second writer to `conf.d`, which makes
+the gatekeeper the sole author of that directory by construction rather than by
+convention.
+
+### 3.7 Migrations
+
+**Corrected from v1.** Naming the gatekeeper as migration runner is a
+convention, not a lock, and the current script actively hides failure:
+`post_deploy.sh:21` runs `migrate --noinput 2>&1 || true`.
+
+- Make migration a **distinct rollout phase** that completes before any node
+  takes the new release.
+- Serialize with a **PostgreSQL advisory lock**, not a role convention, so
+  concurrent invocations cannot both proceed.
+- **Fail the rollout** on a non-zero exit. Never `|| true`.
+- Keep the **expand/contract discipline**: add nullable columns and new tables in
+  the release *before* the code that uses them; drop them in the release *after*
+  the code that stopped using them. A rolling deploy guarantees a window where
+  old code meets the new schema — this constrains how migrations are *written*,
+  not just how they are run, so it belongs in the project's model conventions.
+
+Migration authority should **not** be coupled to the ACME gatekeeper role. They
+are unrelated concerns that happen to both want "one designated node," and
+coupling them means a gatekeeper change silently moves migration authority.
 
 ---
 
-## 4. The gatekeeper: recommendation is *not* to build failover
+## 4. The gatekeeper
 
-A natural question is whether the gatekeeper should be a dynamic role — elected
-in Redis, failed over automatically like an Aurora writer. **We recommend
-against it**, for two reasons.
+**Still recommending against automatic failover**, for reasons v1 gave and the
+review did not dispute: the target group is the real gatekeeper, so an election
+that does not move it changes nothing; and certificate expiry gives weeks, not
+seconds. The right control is an **alarm at 21 days to expiry**, which catches
+every underlying cause at once.
 
-**The load balancer is the real gatekeeper.** Port 80 physically reaches exactly
-one node because of target-group membership. Electing a different node in Redis
-would not change where Let's Encrypt challenges land. To be meaningful, an
-election would also have to modify the AWS target group — a control-plane action
-requiring credentials and its own failure modes.
+**But v1 understated the work.** "One target-group edit" is only true once
+§3.6 is done — every lineage plus renewal state must already be on the
+replacement node, or it can serve existing certificates and renew none of them.
+Until then, gatekeeper replacement is a documented, rehearsed procedure, not a
+one-liner.
 
-**The urgency does not justify it.** Certificates last 90 days and certbot
-retries. Losing the gatekeeper gives us *weeks* to react, not seconds. This is
-not a database-writer problem. The correct control is an **alarm when any
-certificate is within 21 days of expiry** — that single alarm catches every
-underlying cause (gatekeeper down, sync broken, challenge misrouted, permissions
-wrong) — plus a documented procedure for re-designating a gatekeeper.
-
-### But there is a real problem worth fixing
-
-The role is currently named in **two places** that must agree:
-
-- `PRIMARY_BALANCER_HOST` in `var/django.conf`, which `certbot_sync.py` compares
-  against the hostname to decide publish-vs-pull
-- membership of the `certbot-targets` load balancer target group
-
-If they drift, the node receiving challenges decides it is a follower and never
-publishes. Certificates quietly stop renewing while everything looks healthy —
-discovered up to 90 days later.
-
-**Proposal:** have `certbot_sync.py` *derive* the role instead — one AWS API call
-asking "is my instance in the certbot target group?", cached for a few minutes.
-Then the target group is the single source of truth, `PRIMARY_BALANCER_HOST`
-disappears, and this class of failure becomes impossible. Re-designating a
-gatekeeper becomes one target-group edit and nothing else.
-
-That is the change we would make: same static role, no election, but impossible
-to get out of sync.
+**On deriving the role:** v1 proposed asking the ELB API "am I in the certbot
+target group?" The review's counter is better and is adopted — **have Terraform
+write both the target-group membership and a local role marker from the same
+input**. One source of truth, no drift, and no minute-level safety decision
+depending on an AWS API being reachable. `PRIMARY_BALANCER_HOST` in
+`django.conf` goes away; the marker file replaces it.
 
 ---
 
-## 5. What belongs in django-mojo itself
+## 5. What belongs in django-mojo
 
-Deliberately small:
+- **Rollout controller** — the lease, the per-node state machine, target
+  deregistration. This is the substantial piece.
+- **Trigger** — box-direct deploy jobs.
+- **Observability** — each node's deploy outcome as an incident event under
+  `system:deploy:*`, so a node that silently failed to converge appears on the
+  dashboard instead of being found weeks later.
 
-- **Trigger and sequencing** — the deploy job, published box-direct in order.
-- **Observability** — each node reporting its deploy outcome as an incident
-  event under `system:deploy:*`, so a node that silently failed to converge
-  appears on the dashboard instead of being discovered weeks later. Best
-  value-for-effort item here, and the one most likely to be skipped.
-
-Deliberately **not** in django-mojo: carrying the payload, or being required for
-a node to converge. Those stay with S3 and systemd timers, per §2.
+**Not** in django-mojo: carrying the payload, or being required for a node to
+converge.
 
 ---
 
@@ -234,56 +328,66 @@ a node to converge. Those stay with S3 and systemd timers, per §2.
 
 | Alternative | Why rejected |
 |---|---|
-| Job engine performs the deploy (not just triggers it) | Circular dependency; cannot reach a node whose app is down; cannot bootstrap a new node. See §2. |
-| Shared network filesystem (EFS) for content and certs | Adds a shared mutable failure domain to an architecture whose whole purpose is that no single component takes down the fleet. Content is immutable per release and tiny; certs are already solved. |
-| Terminate TLS at the load balancer with AWS ACM certificates | Caps us at 25 certificates per balancer (a hard ceiling for a multi-tenant platform), and requires each tenant to add a validation DNS record that must persist forever or renewals silently stop. |
-| Redis-elected gatekeeper with automatic failover | Does not move the load balancer's port-80 target, so it does not actually change where challenges land. See §4. |
-| CI pushes directly to every node | Requires a node inventory that goes stale; silently skips nodes that are down; new nodes are not populated. See §3.3. |
-| Bake `django.conf` into the AMI | Makes the image a secret-bearing artifact; rotation requires a re-bake; a node from an old AMI boots with old config. |
+| Job engine performs the deploy rather than triggering it | Circular dependency; cannot reach a node whose app is down; cannot bootstrap a new node. §2 |
+| Shared network filesystem (EFS) for content and certs | Adds a shared mutable failure domain to an architecture whose purpose is that no single component takes down the fleet |
+| **Terminate TLS at the load balancer with AWS ACM** | **Corrected.** The 25-certificate figure is the *default* quota and is adjustable — not a ceiling. The real objection is operational: every tenant must add a DNS validation record that persists forever, and silent renewal failure follows if anyone removes it. That burden, against per-tenant onboarding volume, is the actual decision — and it should be revisited if tenant count grows enough that self-managed renewal becomes the larger burden. |
+| Redis-elected gatekeeper with automatic failover | Does not move the load balancer's port-80 target, so it does not change where challenges land. §4 |
+| CI pushes directly to every node | Requires a node inventory that goes stale; silently skips nodes that are down; new nodes are not populated |
+| Bake `django.conf` into the AMI | Makes the image a secret-bearing artifact; rotation requires a re-bake |
+| Deploy `origin/main` | Two nodes in one rollout can land on different commits. §3.4 |
 
 ---
 
-## 7. Open questions — where review is most wanted
+## 7. Open questions
 
-These are the points we are least confident about.
+Reduced from v1 — the review answered four of the five. Remaining:
 
-1. **Is deriving the gatekeeper role from the AWS target group worth the added
-   dependency?** It removes a silent-failure class, but it makes a script that
-   runs every minute depend on an AWS API call (cached). The alternative is
-   keeping `PRIMARY_BALANCER_HOST` and relying on an audit check to catch drift.
+1. **S3 artifacts or pinned Git SHA for API code?** The review prefers
+   artifacts, and we agree; the open part is whether to build that pipeline now
+   or ship pinned-SHA first and migrate. Artifacts remove GitHub from every
+   node's boot path, which is the stronger argument.
 
-2. **Should the API-code deploy use git pull or S3 artifacts?** Git is what
-   exists and needs no new machinery, but it means a deploy depends on GitHub
-   being reachable from every node, and two nodes could theoretically land on
-   different commits if someone pushes mid-deploy. S3 artifacts would pin an
-   exact build.
+2. **Replicate the ACME account key to all nodes?** §3.6 recommends yes on rate-
+   limit grounds. The counter-argument — every node holding a revocation-capable
+   credential — deserves a second opinion, though replicas already hold every
+   private key.
 
-3. **Is per-node `migrate` leadership on the gatekeeper right**, or should
-   migrations be a separate deliberate step that a human runs before triggering
-   the code rollout? Coupling them is convenient; decoupling them is safer.
+3. **Does the rollout controller live in django-mojo or as a standalone
+   script?** In django-mojo it gets the job engine, Redis, and incident
+   reporting for free. Standalone, it keeps working when the app is broken —
+   which is exactly when a rollout is most needed.
 
-4. **How much staleness is acceptable for website content?** We propose a ~30s
-   poll. A push-trigger would be faster but requires CI to reach the job engine.
-
-5. **Does the two-node staging environment need to exist at all?** Staging is
-   currently a single node with no load balancer, which means the multi-node
-   sync paths get their first real exercise in production. Standing up a second
-   staging node temporarily to prove them is cheap insurance.
+**Settled by review:** gatekeeper role from Terraform-generated markers (not the
+ELB API); migrations as a separate locked phase; ~30s website staleness once
+installation is atomic; two-node staging as a release gate.
 
 ---
 
-## 8. Current state
+## 8. Current state, including defects found
 
 **Built and verified:**
-- `aws/terraform/` — VPC, NLB with the two target groups, nodes, encrypted
-  Aurora, Valkey, alarms. Plans clean; capacity presets `micro`/`small`/
-  `medium`/`large`.
-- `aws/certbot_sync.py` — canonical version; distributes the full certificate
-  lineage with pair verification and an `nginx -t` gate before reload.
-- `aws/config_sync.py` — §3.1, tested end-to-end against a live bucket.
+- `aws/terraform/` — VPC, NLB with both target groups, nodes, encrypted Aurora,
+  Valkey, alarms. Plans clean; capacity presets.
+- `aws/certbot_sync.py` — distributes **one** lineage with pair verification and
+  an `nginx -t` gate. Correct for what it does; insufficient for §3.6.
+- `aws/config_sync.py` — script verified end-to-end against a live bucket.
 
-**Proposed, not built:**
-- `certbot_sync.py` extended to carry `conf.d` and derive the gatekeeper role
-- `www_sync.py`
-- sequenced deploy job + migration leadership
-- deploy outcome → incident events
+**Defects in the existing deploy path, all verified:**
+
+1. **`post_deploy.sh` swallows nine failures with `|| true`** — including
+   `pip install -r requirements.txt` (line 17) and `migrate` (line 21). A failed
+   dependency install or migration is invisible and the app restarts anyway,
+   against the wrong schema or with missing packages. This is the most
+   immediately dangerous item in this document.
+2. **`config-sync.timer` is never installed** — `ec2_deploy.sh:83` and
+   `post_deploy.sh:35` copy `*.service` only, and neither unit is enabled.
+3. **`certbot_sync.py` covers one of nine lineages**, and no renewal configs or
+   account key. §3.6.
+4. **`post_deploy.sh:39` restarts `mojo-asgi` while the node is registered.**
+   §3.5.
+
+**Proposed, not built:** `api_sync.py`, `www_sync.py`, the rollout controller,
+multi-lineage `certbot_sync`, Terraform role markers, deploy events → incidents.
+
+Item 1 is worth fixing independently of everything else here — it applies to the
+single-node deployment running today.
