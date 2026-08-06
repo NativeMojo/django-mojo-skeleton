@@ -569,6 +569,104 @@ Re-running with a valid certificate already present should skip to step 6 and
 just re-install to disk — which doubles as the recovery path for a node whose
 local copy was lost.
 
+### 3.9.1 With CNAME delegation — and why it solves more than tenants
+
+Delegation is in flight and not yet merged (verified: no delegation references in
+`mojo/apps/dnsman/` as of this writing), so this is a spec, not a description.
+
+**The realization worth leading with: delegation is not only for tenant domains.
+It removes the "do we have DNS API access for this zone?" problem entirely.**
+
+§3.8 named that as the blocker for step 1 — GoDaddy API access is not held for
+every project, including this one. Delegation dissolves it:
+
+```
+one zone we fully control via API, e.g. acme.mojoverify.com  (Route53)
+
+_acme-challenge.wmwx.io       CNAME  wmx-io.acme.mojoverify.com      <- ours
+_acme-challenge.clubaxo.com   CNAME  clubaxo-com.acme.mojoverify.com <- ours
+_acme-challenge.joecasino.xyz CNAME  joecasino-xyz.acme.mojoverify.com <- tenant's
+
+dnsman writes the TXT into acme.mojoverify.com; ACME follows the CNAME.
+```
+
+We then need API credentials for **exactly one zone, ever**. Every other
+domain — ours or a tenant's — joins with a single manual CNAME added once at
+whatever registrar happens to hold it. No API access to `wmwx.io` required.
+
+**So use delegation uniformly, including for our own domains.** One credential,
+one code path, one onboarding procedure. The alternative — direct DNS-01 where
+we have API access, delegated where we don't — means two paths and a per-domain
+decision about which applies.
+
+### The bootstrap sequence, with delegation
+
+```
+ONCE per organisation:
+  1. create the delegation zone in Route53
+  2. scope a credential to that hosted zone only
+
+ONCE per domain (including the very first one):
+  3. add _acme-challenge.<domain> CNAME <label>.acme.<zone> at the registrar
+     -- manual, no API, and it never changes again
+  4. VERIFY the CNAME resolves before attempting issuance   <-- see below
+  5. manage.py dnsman_bootstrap --domain <domain> --wildcard --install
+```
+
+Nothing here needs HTTPS, the portal, or inbound connectivity, so §3.9's
+conclusion holds unchanged.
+
+### The trap: verify the CNAME before issuing
+
+**Let's Encrypt rate-limits failed validations — 5 per account per hostname per
+hour.** Firing issuance before the delegation CNAME has propagated burns those
+attempts and locks you out for an hour, during a bootstrap, which is precisely
+when you are iterating and least able to wait.
+
+`dnsman_bootstrap` must therefore **pre-flight**: resolve
+`_acme-challenge.<domain>`, confirm it is a CNAME pointing at the expected
+target, and refuse to proceed otherwise. A local DNS lookup is free; a burnt
+rate limit costs an hour. This is the single most valuable thing the command
+does beyond wrapping the existing service calls.
+
+Note there are **two** propagation waits, not one, and they have very different
+characters:
+
+| Wait | Owner | Typical |
+|---|---|---|
+| delegation CNAME | a human, at the registrar | minutes to hours, depends on the zone's TTL |
+| challenge TXT | dnsman, in our own zone | seconds — we control the TTL |
+
+Only the second is dnsman's to manage. The first is why step 4 exists.
+
+### What delegation must get right
+
+Two requirements that fall out of how ACME works, worth stating before the
+implementation lands:
+
+- **Multiple TXT values on one name.** A wildcard and its apex produce two
+  separate authorizations that share the record name `_acme-challenge.<domain>`
+  and require *both* digests present simultaneously — `certs.py` already notes
+  this. Under delegation both land at the same delegated label, so the writer
+  must add TXT values rather than replace them, or the wildcard and apex will
+  clobber each other.
+- **Unique labels per domain.** Many domains delegating into one zone need
+  distinct targets or they collide. `Domain` needs a stored delegation label,
+  generated once and stable, since the tenant's CNAME points at it forever.
+
+### The delegation zone is a high-value target
+
+Worth naming explicitly: **whoever can write to the delegation zone can obtain a
+certificate for every domain delegated to it** — including tenants'. That is a
+meaningful concentration of authority that does not exist in the current
+per-box certbot setup.
+
+Mitigations, none expensive: make it a **dedicated** zone rather than a
+subdomain of an operational one; scope the credential to that single hosted zone
+(Route53 IAM supports this); and keep it out of `django.conf` once nodes carry an
+instance profile. The credential's blast radius should be "can write TXT records
+in one zone," not "can manage our DNS."
+
 ### The one real ordering constraint
 
 nginx will not start with `ssl_certificate` pointing at a file that does not
