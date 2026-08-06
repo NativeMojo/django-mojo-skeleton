@@ -46,6 +46,58 @@ separate things then need to reach every node:
 | 3 | **Static website builds** (`/opt/www/<project>`) | a web dev pushes to main |
 | 4 | **API code** (`/opt/api`) | we ship a feature |
 
+### 1.1 Non-negotiable constraints
+
+These are project policy, not proposals. The design must accommodate them.
+
+**C1. django-mojo is upgraded on every deploy, and is never pinned.**
+Pinning has failed this team before: a version frozen in `requirements.txt` went
+stale and critical security releases were not picked up because nobody bumped
+it. `pip install --upgrade django-mojo` on every deploy is deliberate.
+
+**C2. Migrations run on every deploy.**
+Not conditionally, not manually. A deploy that skips migrations is a deploy that
+leaves the schema behind the code.
+
+Both constraints are currently *approximated* rather than met — see §8.
+
+### 1.2 C1 conflicts with immutable release artifacts — and the fix
+
+§3.1 says a release is an immutable id, so every node in a rollout runs
+identical code. C1 says each node upgrades django-mojo to whatever is newest.
+Those cannot both be true if each node resolves "newest" at its own moment:
+
+```
+10:00  node 1 deploys, resolves django-mojo 1.2.62
+10:02  django-mojo 1.2.63 is published
+10:05  node 2 deploys, resolves django-mojo 1.2.63
+       -> fleet split across two framework versions
+```
+
+Worse, if 1.2.63 ships a migration, node 2's deploy applies it and node 1 is now
+running older framework code against a newer schema — the expand/contract hazard,
+in code we do not control.
+
+**The goal and the mechanism are separable.** The goal is "never miss a security
+release." The mechanism does not have to be "each node independently resolves
+latest at its own moment."
+
+**Resolve once per rollout, pin within it.** At the start of a rollout, resolve
+the newest django-mojo **once**, record the exact version in the release
+manifest, and have every node install *that* version. Every deploy still picks up
+the newest framework — nothing is frozen across time — but all nodes in one
+rollout provably agree.
+
+This is not the pinning that caused the original problem. That was a version
+sitting in `requirements.txt` for months. This is a version resolved fresh on
+every single deploy and held constant only for the minutes a rollout takes.
+
+**Consequence of C1 + C2 together:** a framework release that ships migrations
+gets those migrations applied automatically, sight unseen. That is the accepted
+cost of not pinning, and it raises the value of two things already in this plan:
+staging running the identical rollout first (§7, settled), and the rollout
+halting on migration failure instead of continuing (§3.7).
+
 ### The topology
 
 Already built in `aws/terraform/`:
@@ -182,6 +234,12 @@ mid-deploy. Either publish an S3 artifact built once in CI (preferred — it als
 removes a GitHub dependency from every node's boot path), or at minimum pin and
 deploy an exact SHA. Deploying `origin/main` should be prohibited.
 
+**A release id covers dependencies, not just application code.** Per §1.2 the
+manifest carries the django-mojo version resolved once at rollout start, so
+"same release id" means the same framework too. Without that, C1 silently
+reintroduces the split-fleet problem this paragraph is about — just one layer
+down, where it is harder to see.
+
 ### 3.5 The rollout — how zero downtime is actually achieved
 
 **Corrected from v1**, which wrongly assumed sequencing was sufficient.
@@ -270,11 +328,19 @@ convention.
 convention, not a lock, and the current script actively hides failure:
 `post_deploy.sh:21` runs `migrate --noinput 2>&1 || true`.
 
+Per **C2**, migrations run on every deploy — there is no "migrations release"
+and no opt-in flag. The current `if [[ -f var/allow_migrate ]]` gate
+(`post_deploy.sh:19`) does not meet that constraint and should be removed; see
+§8.
+
 - Make migration a **distinct rollout phase** that completes before any node
   takes the new release.
-- Serialize with a **PostgreSQL advisory lock**, not a role convention, so
-  concurrent invocations cannot both proceed.
+- Serialize with a **PostgreSQL advisory lock**, not a role convention or a flag
+  file, so concurrent invocations cannot both proceed. A lock is what
+  `allow_migrate` was reaching for; a file cannot serialize anything.
 - **Fail the rollout** on a non-zero exit. Never `|| true`.
+- Migrate with the **release's resolved django-mojo version installed** (§1.2),
+  so framework migrations and framework code enter the fleet together.
 - Keep the **expand/contract discipline**: add nullable columns and new tables in
   the release *before* the code that uses them; drop them in the release *after*
   the code that stopped using them. A rolling deploy guarantees a window where
@@ -375,10 +441,24 @@ installation is atomic; two-node staging as a release gate.
 **Defects in the existing deploy path, all verified:**
 
 1. **`post_deploy.sh` swallows nine failures with `|| true`** — including
-   `pip install -r requirements.txt` (line 17) and `migrate` (line 21). A failed
-   dependency install or migration is invisible and the app restarts anyway,
-   against the wrong schema or with missing packages. This is the most
-   immediately dangerous item in this document.
+   `pip install --upgrade django-mojo` (line 14), `pip install -r
+   requirements.txt` (line 17) and `migrate` (line 21). A failed dependency
+   install or migration is invisible and the app restarts anyway, against the
+   wrong schema or with missing packages. This is the most immediately dangerous
+   item in this document.
+
+   Note what line 14 means against **C1**: the policy is "never miss a security
+   release," and the command implementing it discards its own exit status. A
+   node that cannot reach PyPI, or hits a resolver conflict, silently keeps the
+   old django-mojo and reports a successful deploy. The constraint is stated but
+   not currently enforced.
+
+1b. **Migrations do not run on every deploy** (**C2**). `post_deploy.sh:19`
+   gates `migrate` behind the existence of `var/allow_migrate`. The file happens
+   to exist on the current box, so migrations do run there — but it is opt-in
+   per box, which means a node built from an AMI without it silently skips
+   migrations forever, and two boxes that both have it both migrate
+   concurrently. Replace the flag with the advisory lock in §3.7.
 2. **`config-sync.timer` is never installed** — `ec2_deploy.sh:83` and
    `post_deploy.sh:35` copy `*.service` only, and neither unit is enabled.
 3. **`certbot_sync.py` covers one of nine lineages**, and no renewal configs or
