@@ -117,6 +117,56 @@ confirming a replica pulls the lineage and serves TLS with it, then destroying
 it. That is the one component that is both new and load-bearing, and it
 otherwise gets its first real run in production.
 
+## Changing capacity
+
+`size` moves several dimensions together. **Not all of them are seamless, and the
+difference is entirely about counts versus instance types.**
+
+| change | what AWS does | interruption |
+|---|---|---|
+| `node_count` up | creates instances, attaches to the target group | **none** — additive |
+| `db_reader_count` up | builds a reader from the shared cluster volume | **none** — additive |
+| `cache_replicas` up | adds a replica to the group | **none** — additive |
+| `cache_type` | in-place `ModifyReplicationGroup`, resize by failover | **seconds** of connection resets |
+| `node_type` | `instance_type` needs the instance **stopped** | **that node is down** |
+| `db_class` | modifies cluster members; the writer restarts | **writer unavailable** |
+| `node_count` down | destroys the highest-indexed instances | drains, then gone |
+| `az_count`, `vpc_cidr` | replaces the VPC | **rebuild** |
+
+So:
+
+**`small` → `medium` is a live change.** It moves counts only — 2 nodes to 4,
+1 reader to 2 — plus the cache node type. Everything except the cache is purely
+additive; the cache resize is a few seconds of failover that any client with
+reconnect logic absorbs. Do the cache in the maintenance window (it waits there
+by default, since `apply_immediately = false`) and the API tier during the day.
+
+**`medium` → `large` is not.** It changes `node_type` and `db_class`, and a
+blind `tofu apply` would stop every node at once and restart the writer. Roll it:
+
+```bash
+# nodes, one at a time — each is out of the target group while it restarts
+tofu apply -var-file=envs/<env>.tfvars -target='module.nodes.aws_instance.node[1]'
+tofu apply -var-file=envs/<env>.tfvars -target='module.nodes.aws_instance.node[2]'
+# ... leaving the gatekeeper (index 0) for last
+```
+
+For Aurora, change the readers first, then fail over onto a resized reader, then
+change the old writer. Terraform will not sequence that for you — do the
+failover with `aws rds failover-db-cluster` between applies, or accept one
+restart in a window.
+
+**Adding nodes has a provisioning step Terraform does not cover.** A new instance
+comes up from the AMI with no Let's Encrypt lineage. `certbot_sync.py` pulls it
+from S3 within a minute, but the node fails its HTTPS health check until it does
+and will not take traffic. That is correct behaviour — just don't mistake it for
+a broken deploy in the first minute.
+
+**Scale down carefully.** `node_count` down destroys the highest-indexed
+instances. The `gatekeeper_survives_scale_down` check keeps the ACME endpoint at
+index 0 so a scale-down never destroys it — losing it stops certificate renewal
+while traffic keeps flowing, which looks like nothing at all for 90 days.
+
 ## What is deliberately not here
 
 **Provisioning.** Terraform creates instances and sets their hostname; the

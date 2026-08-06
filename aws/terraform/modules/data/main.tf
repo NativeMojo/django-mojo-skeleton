@@ -66,8 +66,15 @@ resource "aws_rds_cluster" "this" {
   }
 }
 
+# One writer plus reader_count readers. Adding a reader is additive — Aurora
+# builds it from the shared cluster volume and it starts taking traffic when
+# ready, with no interruption to the writer.
+#
+# CHANGING instance_class is a different matter: Terraform would modify every
+# member at once, which restarts the writer. Do that as a rolling change
+# instead — see README, "Changing capacity".
 resource "aws_rds_cluster_instance" "this" {
-  count = var.reader ? 2 : 1
+  count = 1 + var.reader_count
 
   identifier         = "${local.name}-cluster-instance-${count.index + 1}"
   cluster_identifier = aws_rds_cluster.this.id

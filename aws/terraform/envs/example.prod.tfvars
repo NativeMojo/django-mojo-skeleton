@@ -11,10 +11,13 @@ project = "example"
 env     = "prod"
 region  = "us-east-1"
 
+# 2 nodes, 1 writer + 1 reader, 2 cache nodes. Move to "medium" for 4 nodes,
+# 2 readers and larger cache — see README, "Changing capacity", for which parts
+# of that change are seamless and which are not.
+size = "small"
+
 az_count = 2
 
-node_count       = 2
-node_type        = "t3.medium"
 node_ami         = "" # pin a baked AMI before this is real
 node_volume_gb   = 30
 ssh_key_name     = "example-prod"
@@ -26,13 +29,9 @@ admin_cidrs = ["0.0.0.0/0"]
 
 use_nlb = true
 
-db_class                 = "db.t4g.medium"
-db_reader                = true
 db_backup_retention_days = 35
 db_deletion_protection   = true
 
-cache_type                    = "cache.t4g.medium"
-cache_replicas                = 1
 cache_snapshot_retention_days = 5
 
 # The django-mojo ingest. Needs mojo.apps.aws routed and the topic ARN in

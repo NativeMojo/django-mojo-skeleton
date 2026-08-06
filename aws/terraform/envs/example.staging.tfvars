@@ -12,23 +12,19 @@ project = "example"
 env     = "staging"
 region  = "us-west-2"
 
-az_count = 2 # the data subnet group needs two AZs even with one node
+size = "micro" # 1 node, no reader, 1 cache node
 
-node_count   = 1
-node_type    = "t4g.small"
+az_count = 2 # the data subnet groups need two AZs even with one node
+
 node_ami     = "" # latest AL2023; pin once an AMI is baked
 ssh_key_name = "example-staging"
 admin_cidrs  = ["0.0.0.0/0"] # key-only auth; narrow it if you like
 
 use_nlb = false
 
-db_class                 = "db.t4g.medium"
-db_reader                = false
 db_backup_retention_days = 7
 db_deletion_protection   = false # staging gets torn down on purpose
 
-cache_type                    = "cache.t4g.micro"
-cache_replicas                = 0 # no failover; nothing here is worth recovering
 cache_snapshot_retention_days = 1
 
 alarm_endpoint     = "" # set once the aws app is routed

@@ -6,7 +6,10 @@ variable "cache_sg_id" { type = string }
 
 variable "db_engine_version" { type = string }
 variable "db_class" { type = string }
-variable "reader" { type = bool }
+variable "reader_count" {
+  description = "Aurora readers in addition to the writer."
+  type        = number
+}
 variable "backup_retention_days" { type = number }
 variable "deletion_protection" { type = bool }
 

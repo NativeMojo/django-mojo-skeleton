@@ -47,18 +47,50 @@ variable "az_count" {
   }
 }
 
+# ── capacity ─────────────────────────────────────────────────────────────────
+
+variable "size" {
+  description = <<-EOT
+    Capacity preset. Sets node count, instance types, reader count and cache
+    size together, so an environment is described by one word rather than six
+    numbers that can drift out of proportion to each other.
+
+      micro   1 node,  0 readers, 1 cache node   — staging; not survivable
+      small   2 nodes, 1 reader,  2 cache nodes  — production floor
+      medium  4 nodes, 2 readers, 2 cache nodes  — same instance types as small
+      large   6 nodes, 2 readers, 3 cache nodes  — larger types; needs a window
+
+    small -> medium changes counts only, which is what makes it a live step.
+    -> large changes instance types and does not apply cleanly in one go; see
+    README, "Changing capacity".
+
+    Any individual field below overrides its preset value, so "small but with
+    bigger nodes" does not require a new preset. See local.capacity in main.tf.
+  EOT
+  type        = string
+  default     = "small"
+
+  validation {
+    condition     = contains(["micro", "small", "medium", "large"], var.size)
+    error_message = "size must be one of: micro, small, medium, large."
+  }
+}
+
 # ── nodes ────────────────────────────────────────────────────────────────────
+#
+# These default to null, meaning "take it from the size preset". Set one to
+# override just that field.
 
 variable "node_count" {
   description = "Number of application nodes. All identical; any can be the gatekeeper."
   type        = number
-  default     = 1
+  default     = null
 }
 
 variable "node_type" {
   description = "EC2 instance type for application nodes."
   type        = string
-  default     = "t3.medium"
+  default     = null
 }
 
 variable "node_ami" {
@@ -134,19 +166,23 @@ variable "db_engine_version" {
 }
 
 variable "db_class" {
-  description = "Instance class for Aurora members."
+  description = "Instance class for Aurora members. Null takes the size preset."
   type        = string
-  default     = "db.t4g.medium"
+  default     = null
 }
 
-variable "db_reader" {
+variable "db_reader_count" {
   description = <<-EOT
-    Add a reader in a second AZ. Without one there is no standby: an instance
-    failure means a restore rather than a sub-minute automatic promotion.
-    Production should always be true.
+    Readers in addition to the writer. Null takes the size preset.
+
+    Zero means there is no standby: an instance failure becomes a restore rather
+    than a sub-minute automatic promotion. Only acceptable in staging.
+
+    Adding a reader later is additive and causes no interruption — Aurora builds
+    it from the shared cluster volume and it joins when ready.
   EOT
-  type        = bool
-  default     = false
+  type        = number
+  default     = null
 }
 
 variable "db_backup_retention_days" {
@@ -175,19 +211,28 @@ variable "cache_engine_version" {
 }
 
 variable "cache_type" {
-  description = "ElastiCache node type."
+  description = <<-EOT
+    ElastiCache node type. Null takes the size preset.
+
+    Resizing later is an in-place ModifyReplicationGroup, not a rebuild, but it
+    is the ONE capacity change that interrupts: ElastiCache scales by failing
+    over to a resized node, so expect a few seconds of connection resets. It
+    waits for the maintenance window unless applied immediately.
+  EOT
   type        = string
-  default     = "cache.t4g.medium"
+  default     = null
 }
 
 variable "cache_replicas" {
   description = <<-EOT
-    Replicas beyond the primary. 1+ enables automatic failover and Multi-AZ;
-    0 means losing the primary is manual intervention and is only acceptable
-    where the cache holds nothing you mind rebuilding.
+    Replicas beyond the primary. Null takes the size preset.
+
+    1+ enables automatic failover and Multi-AZ; 0 means losing the primary is
+    manual intervention, acceptable only where the cache holds nothing you mind
+    rebuilding.
   EOT
   type        = number
-  default     = 1
+  default     = null
 }
 
 variable "cache_snapshot_retention_days" {
