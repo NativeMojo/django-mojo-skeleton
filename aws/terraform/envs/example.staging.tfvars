@@ -6,7 +6,13 @@
 # second node for an afternoon once, to prove a replica pulls the lineage and
 # serves TLS with it, then destroying it.
 #
-# Convention: staging in us-west-2, production in us-east-1, separate accounts.
+# Shares an account with production; separated by region and by the <project>-
+# <env> naming on every resource. Per-environment cost comes from the Env
+# default tag — activate it as a cost allocation tag in Billing.
+#
+# enable_cloudtrail stays false here: a multi-region trail is account-wide, so
+# production's trail already records this environment. Two trails would just
+# bill twice for the same events.
 
 project = "example"
 env     = "staging"

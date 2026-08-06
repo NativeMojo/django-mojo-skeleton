@@ -263,7 +263,14 @@ variable "alarm_email" {
 }
 
 variable "enable_cloudtrail" {
-  description = "Multi-region CloudTrail. Without it there is no record of who changed what."
+  description = <<-EOT
+    Multi-region CloudTrail. Without it there is no record of who changed what.
+
+    ACCOUNT-WIDE, not region-scoped. When several environments share an account,
+    exactly one of them should set this — production. A second trail records the
+    same events into a second bucket and bills you twice for it, and staging is
+    already covered by production's trail.
+  EOT
   type        = bool
   default     = true
 }

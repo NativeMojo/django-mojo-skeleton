@@ -65,11 +65,19 @@ distributes the issued lineage to the rest via S3.
 tofu init \
   -backend-config=bucket=mojo-tfstate-<account-id> \
   -backend-config=key=<project>/<env>.tfstate \
-  -backend-config=region=<region> \
+  -backend-config=region=us-east-1 \
   -backend-config=dynamodb_table=mojo-tfstate-lock
 
 cp envs/example.prod.tfvars envs/<project>.prod.tfvars
 $EDITOR envs/<project>.prod.tfvars
+```
+
+> The backend `region` is where the **state bucket** lives; it is not where
+> resources go. One state bucket in us-east-1 holds state for every environment
+> regardless of which region each one builds into. `var.region` in the tfvars is
+> what places the infrastructure.
+
+```bash
 
 tofu plan  -var-file=envs/<project>.prod.tfvars
 tofu apply -var-file=envs/<project>.prod.tfvars
@@ -106,10 +114,36 @@ software, so it does not pay for infrastructure it is not testing.
 `example.prod.tfvars` — NLB across two AZs, two nodes, Aurora writer + reader,
 cache with a replica, 35-day backups, CloudTrail and GuardDuty on.
 
-Convention: **staging and production live in separate AWS accounts**, staging in
-us-west-2 and production in us-east-1. Separate accounts give a hard blast-radius
-boundary — a staging credential cannot reach production, no policy needed — plus
-clean per-environment billing.
+### Accounts and regions
+
+Current convention: **one account, two regions** — production in us-east-1,
+staging in us-west-2. Every resource is named `<project>-<env>-*` and lives in
+its own state file, so the two coexist without collision and staging can be
+lifted into its own account later by re-applying against different credentials.
+
+Per-environment cost visibility does not require separate accounts. The provider
+sets `Project` and `Env` as default tags on everything, so activating **Env** as
+a cost allocation tag in Billing gives a per-environment breakdown in Cost
+Explorer. Do that once, in the account, before the bill gets interesting.
+
+What you give up by sharing an account is the hard boundary: a staging
+credential *can* reach production resources, and nothing but IAM policy stops
+it. That is a real cost, not a theoretical one, and it is the reason to revisit
+this once the account has more than one pair of hands in it.
+
+> **One thing genuinely collides in a shared account: CloudTrail.** A
+> multi-region trail is account-wide, not region-scoped, so two environments
+> both setting `enable_cloudtrail = true` produce two trails recording the same
+> events into two buckets and bill you twice. **Let production own it and leave
+> `enable_cloudtrail = false` in staging** — staging's activity is captured by
+> production's trail anyway, because the trail is account-wide.
+>
+> GuardDuty is per-region, so it does not collide across regions. It would if
+> both environments were in the same region.
+
+For reference, us-east-1 and us-west-2 are priced essentially identically for
+EC2, RDS and ElastiCache, so the region choice here is about isolation rather
+than cost.
 
 Because staging has no balancer, the multi-node `certbot_sync.py` path is never
 exercised there. It is worth adding a second staging node for an afternoon once,
