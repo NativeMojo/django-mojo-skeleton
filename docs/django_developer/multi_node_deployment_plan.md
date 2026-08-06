@@ -519,6 +519,85 @@ we adopt it ourselves.
 evaluated.** It is the largest work item in this plan and dnsman may remove most
 of its justification. The wildcard alone changes the shape of the problem.
 
+## 3.9 Bootstrapping the first certificate — there is no chicken-and-egg
+
+The obvious worry: dnsman is driven from the admin portal, the portal needs
+HTTPS, HTTPS needs a certificate, and the certificate comes from dnsman.
+
+**That circle does not exist, and the reason is the whole point of DNS-01.**
+
+HTTP-01 requires Let's Encrypt to reach *your server* on port 80 — which is why
+it forces the port-80 gatekeeper, and why it would create a genuine bootstrap
+paradox. DNS-01 requires nothing to reach your server at all. The ACME server
+queries **public DNS**; your box only makes outbound calls, to Let's Encrypt and
+to the DNS provider API.
+
+So the first certificate can be issued on a box that has no valid certificate,
+has nginx stopped, has 80 and 443 closed, and is not publicly reachable. It
+needs only:
+
+- Django and a migrated database (dnsman's tables)
+- one `DnsCredential` row for the zone — the single manual secret
+- outbound HTTPS
+
+That makes bootstrap a **local management command**, not a portal workflow. No
+HTTPS required to obtain HTTPS.
+
+### `manage.py dnsman_bootstrap` — proposed
+
+dnsman currently ships **no management commands** (verified), so this is new.
+It should be idempotent, synchronous, and safe to re-run.
+
+```
+manage.py dnsman_bootstrap --domain wmwx.io --wildcard --install
+```
+
+1. Check the DB is reachable and dnsman's migrations are applied.
+2. Ensure a verified `DnsCredential` for the zone; prompt or take arguments if
+   absent. This is the one thing a human must supply.
+3. Ensure the `Domain` row exists.
+4. `certs.request_certificate(domain, ["wmwx.io", "*.wmwx.io"])`.
+5. **Issue synchronously.** `request_certificate` only queues
+   `publish_job(ISSUE_JOB, cert)`, so issuance normally happens on a job runner.
+   Bootstrap cannot assume a runner is up, so the command must call
+   `certs.issue(cert)` directly and wait.
+6. Write `cert_pem` / `chain_pem` / private key to the path nginx expects, key
+   at `0600`.
+7. `nginx -t`, and reload only if it passes.
+
+Re-running with a valid certificate already present should skip to step 6 and
+just re-install to disk — which doubles as the recovery path for a node whose
+local copy was lost.
+
+### The one real ordering constraint
+
+nginx will not start with `ssl_certificate` pointing at a file that does not
+exist. A brand-new node therefore cannot serve 443 before its first certificate,
+which would leave no way to observe the box while bootstrapping.
+
+**Ship a self-signed placeholder in the AMI** at the same paths. The box then
+comes up serving 443 with a browser warning rather than not serving at all, one
+nginx config works in both states, and the bootstrap simply replaces the files
+and reloads. Cheaper than maintaining two nginx configurations.
+
+### Bringing up a new environment, end to end
+
+```
+terraform apply
+   -> nodes boot, self-signed placeholder serves 443
+   -> config_sync pulls django.conf
+   -> migrate                              (dnsman tables exist)
+   -> seed the DnsCredential               (the one manual secret)
+   -> manage.py dnsman_bootstrap --domain <apex> --wildcard --install
+        DNS-01: no inbound connectivity needed
+   -> real certificate on disk, nginx reloaded
+   -> admin portal reachable over HTTPS
+   -> every subsequent domain is done through the portal
+```
+
+This is exactly the "hand an AI session a script and let it stand up an
+environment" shape: everything before the portal is one command with one secret.
+
 ## 4. The gatekeeper
 
 **Still recommending against automatic failover**, for reasons v1 gave and the
