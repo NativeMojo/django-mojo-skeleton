@@ -341,15 +341,92 @@ and no opt-in flag. The current `if [[ -f var/allow_migrate ]]` gate
 - **Fail the rollout** on a non-zero exit. Never `|| true`.
 - Migrate with the **release's resolved django-mojo version installed** (§1.2),
   so framework migrations and framework code enter the fleet together.
-- Keep the **expand/contract discipline**: add nullable columns and new tables in
-  the release *before* the code that uses them; drop them in the release *after*
-  the code that stopped using them. A rolling deploy guarantees a window where
-  old code meets the new schema — this constrains how migrations are *written*,
-  not just how they are run, so it belongs in the project's model conventions.
-
 Migration authority should **not** be coupled to the ACME gatekeeper role. They
 are unrelated concerns that happen to both want "one designated node," and
 coupling them means a gatekeeper change silently moves migration authority.
+
+### 3.7.1 Rolling vs stop-the-world is a per-release choice, not a per-system one
+
+The framing so far — "either roll and accept a window where old code meets a new
+schema, or drop everything and restart together" — is a real dilemma, but it is
+only a dilemma for a **minority of releases**. Most deploys carry no migration
+at all, or an additive one that old code is entirely indifferent to.
+
+So do not pick one strategy for the system. **Classify the release, then pick.**
+
+**Two hazards, and they are independent.** Conflating them is why this feels
+harder than it is:
+
+| Hazard | Question | Example | Mitigation |
+|---|---|---|---|
+| **Compatibility** | does *old code* break against the new schema? | `DROP COLUMN`, `RENAME`, type change | stop-the-world, or expand/contract |
+| **Lock** | does the migration *itself* block traffic while running? | non-concurrent `CREATE INDEX`, table rewrite | write the migration differently |
+
+They need different answers. `DROP COLUMN` in Postgres is fast — it is metadata
+only — so it has no lock hazard at all, but it breaks any running old code that
+still selects the column. Conversely `CREATE INDEX` without `CONCURRENTLY` is
+perfectly compatible with old code, but takes an `ACCESS EXCLUSIVE` lock for the
+duration, which on a large table is minutes of total outage. **Stop-the-world
+does not help the second case** — the lock outlasts the restart. Only writing
+the migration correctly does.
+
+**Release classes:**
+
+- **Class A — no migrations.** Roll. Zero risk, zero downtime. This is most
+  deploys.
+- **Class B — additive only.** `CREATE TABLE`, `ADD COLUMN` nullable or with a
+  default, `CREATE INDEX CONCURRENTLY`, `ADD CONSTRAINT ... NOT VALID`. Roll.
+  Old code simply does not see the new objects.
+- **Class C — compatibility-breaking.** `DROP`, `RENAME`, type changes,
+  `SET NOT NULL`. Requires a choice: stop-the-world (all nodes restart together,
+  ~10–30s of downtime) or split across two releases expand/contract style.
+  Should be **rare and deliberate**.
+
+The point is that only Class C forces the dilemma, and Class C is the exception.
+Requiring expand/contract for *every* migration — as v2 implied — is a
+discipline burden out of proportion to the actual risk.
+
+**This can be determined, not guessed.** `manage.py migrate --plan` says whether
+there are unapplied migrations at all (Class A). `manage.py sqlmigrate` emits the
+SQL for the rest, and it can be pattern-matched for the Class C operations. The
+rollout controller can classify the release and either proceed rolling or refuse
+to roll and demand an explicit stop-the-world flag. That converts today's "we
+hope the migration doesn't impact legacy" into a decision made from evidence.
+
+Two Postgres notes, since we are on Aurora PostgreSQL 17 and much of the folklore
+here predates it: `ADD COLUMN` with a non-volatile default has been metadata-only
+since PG 11, and `SET NOT NULL` can skip its table scan since PG 12 when a valid
+`CHECK` constraint already proves it. Several operations that used to be Class C
+are now cheap — worth verifying per case rather than assuming either way.
+
+### 3.7.2 Prior art: payomi's `post_update.sh`
+
+An existing production system in this family solves the same problem, and it is
+worth recording both what it gets right and where it does not generalise.
+
+What it does: upgrades the framework unpinned (`pip install django-restit
+--upgrade`, the same C1 policy), then uses a wall-clock barrier —
+`wait_until_seconds 50` before `migrate`, `wait_until_seconds 55` after — so
+that nodes deploying in the same minute converge on a common instant.
+
+It is a clever way to get approximate synchronisation with no coordination
+primitive available. But it should not be carried forward as-is:
+
+- **The barrier is unreliable by construction.** `wait_until_seconds 50` returns
+  immediately if it is already past :50. A node arriving at :48 waits two
+  seconds; a node arriving at :52 does not wait at all. Nodes starting in
+  different minutes are not synchronised whatsoever.
+- **It parallelises migrations rather than serialising them.** Every node
+  reaching the barrier runs `migrate` at the same instant, which is the opposite
+  of what is wanted. Django's `migrate` is not concurrency-safe; simultaneous
+  runs race between reading `django_migrations` and applying DDL. This is very
+  likely why the wmx variant grew `|| true` — to swallow the resulting duplicate
+  -object errors.
+- It confirms C1 is a house pattern rather than a wmx quirk, which is useful.
+
+The advisory lock in §3.7 is the primitive the barrier was approximating. It
+gives real serialisation instead of approximate simultaneity, and it does not
+depend on where in the minute a node happens to arrive.
 
 ---
 
