@@ -2,8 +2,6 @@ from .db import *
 
 DEBUG = False
 
-SECRET_KEY = 'PUT IN YOUR var/django.conf'
-
 MEDIA_HOST = "http://localhost:9009"
 
 ALLOW_ADMIN_SITE = False

@@ -50,6 +50,10 @@ pip install -e .
 .venv/bin/python ./bin/manage.py runserver 9009
 ```
 
+The first management command run prompts to initialize `var/` when it is absent. Accepting the
+prompt creates `var/django.conf` with a generated `SECRET_KEY` and safe local defaults. Add any
+environment-specific credentials yourself; initialization does not generate or discover them.
+
 ### 5. Deploy to AWS
 
 ```bash
@@ -60,11 +64,14 @@ python aws/deploy.py
 git clone git@github.com:YourOrg/my-new-project.git /opt/api
 sudo bash /opt/api/aws/ec2_deploy.sh
 echo "prod" > /opt/api/var/profile
-# Edit /opt/api/var/django.conf with credentials
+# Create or edit /opt/api/var/django.conf with the SECRET_KEY and environment credentials
 /opt/api/.venv/bin/python /opt/api/bin/manage.py migrate
 sudo certbot --nginx -d yourdomain.com
 sudo systemctl enable --now mojo-asgi
 ```
+
+If `var/` was initialized before deployment, keep its generated `SECRET_KEY`. Database, cache,
+AWS, and other environment credentials remain operator-supplied in every deployment.
 
 ## What's Included
 

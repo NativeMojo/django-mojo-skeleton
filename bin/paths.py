@@ -76,13 +76,16 @@ def check_var():
             # Create django.conf with secret key
             django_conf = VAR_ROOT / "django.conf"
             secret_key = generate_secret_key()
-            django_conf.write_text(f"SECRET_KEY = '{secret_key}'")
-            django_conf.write_text("ALLOW_ADMIN_SITE = False")
-            django_conf.write_text("ADMIN_SITE_PREFIX = 'admin'")
-            django_conf.write_text("OPENAPI_DOCS_SHOW = False")
             docs_key = ''.join(secrets.choice(string.ascii_uppercase) for _ in range(4)) + '-' + \
                        ''.join(secrets.choice(string.ascii_lowercase) for _ in range(4))
-            django_conf.write_text(f"OPENAPI_DOCS_KEY = '{docs_key}'")
+            assignments = [
+                f"SECRET_KEY = '{secret_key}'",
+                "ALLOW_ADMIN_SITE = False",
+                "ADMIN_SITE_PREFIX = 'admin'",
+                "OPENAPI_DOCS_SHOW = False",
+                f"OPENAPI_DOCS_KEY = '{docs_key}'",
+            ]
+            django_conf.write_text("\n".join(assignments) + "\n")
             # Create logs directory
             log_dir = VAR_ROOT / "logs"
             log_dir.mkdir(exist_ok=True)

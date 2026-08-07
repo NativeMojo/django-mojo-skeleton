@@ -17,8 +17,6 @@ from .jobs import *
 BASE_DIR = paths.PROJECT_ROOT
 
 # ── Security ──────────────────────────────────────────────────────────────────
-SECRET_KEY = "SETYOUROWNKEY"
-
 ALLOW_ADMIN_SITE = False
 
 DEBUG = False
