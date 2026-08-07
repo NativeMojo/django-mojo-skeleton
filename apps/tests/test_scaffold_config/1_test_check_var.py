@@ -1,5 +1,6 @@
 import ast
 import re
+import stat
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -27,21 +28,24 @@ def test_check_var_accepts_initialization(opts):
             "Accepted initialization should create the keys directory"
 
         config_path = var_root / "django.conf"
+        config_mode = stat.S_IMODE(config_path.stat().st_mode)
+        assert config_mode == 0o600, \
+            f"Generated django.conf mode should be 0600, got {config_mode:04o}"
         config_text = config_path.read_text()
         config_lines = config_text.splitlines()
         assert config_text.endswith("\n"), \
             "Generated django.conf should end with one parseable trailing newline"
         assert len(config_lines) == 5, \
-            f"Generated django.conf should contain exactly five assignments, got {config_lines!r}"
+            f"Generated django.conf should contain exactly five assignments, got {len(config_lines)}"
         assert re.fullmatch(r"SECRET_KEY = '[A-Za-z0-9]{50}'", config_lines[0]), \
-            f"First assignment should be a 50-character alphanumeric SECRET_KEY, got {config_lines[0]!r}"
+            "First assignment should be a 50-character alphanumeric SECRET_KEY"
         assert config_lines[1:4] == [
             "ALLOW_ADMIN_SITE = False",
             "ADMIN_SITE_PREFIX = 'admin'",
             "OPENAPI_DOCS_SHOW = False",
-        ], f"Middle assignments should retain their exact order and values, got {config_lines[1:4]!r}"
+        ], "Middle assignment fields should retain their exact order and values"
         assert re.fullmatch(r"OPENAPI_DOCS_KEY = '[A-Z]{4}-[a-z]{4}'", config_lines[4]), \
-            f"Final assignment should use the generated docs-key pattern, got {config_lines[4]!r}"
+            "Final assignment should use the generated OPENAPI_DOCS_KEY pattern"
 
         loaded = {}
         DjangoConfigLoader(config_path=config_path).load_config(loaded)
@@ -51,11 +55,11 @@ def test_check_var_accepts_initialization(opts):
             "ADMIN_SITE_PREFIX",
             "OPENAPI_DOCS_SHOW",
             "OPENAPI_DOCS_KEY",
-        ], f"Config loader should round-trip exactly the five generated settings, got {loaded!r}"
+        ], f"Config loader should round-trip exactly the five generated fields, got {list(loaded)!r}"
         assert type(loaded["SECRET_KEY"]) is str, \
             f"SECRET_KEY should load as str, got {type(loaded['SECRET_KEY']).__name__}"
         assert len(loaded["SECRET_KEY"]) == 50 and loaded["SECRET_KEY"].isalnum(), \
-            f"SECRET_KEY should load as 50 alphanumeric characters, got {loaded['SECRET_KEY']!r}"
+            f"SECRET_KEY should load as 50 alphanumeric characters; length={len(loaded['SECRET_KEY'])}, alphanumeric={loaded['SECRET_KEY'].isalnum()}"
         assert type(loaded["ALLOW_ADMIN_SITE"]) is bool and loaded["ALLOW_ADMIN_SITE"] is False, \
             f"ALLOW_ADMIN_SITE should load as boolean False, got {loaded['ALLOW_ADMIN_SITE']!r}"
         assert type(loaded["ADMIN_SITE_PREFIX"]) is str and loaded["ADMIN_SITE_PREFIX"] == "admin", \
@@ -65,7 +69,7 @@ def test_check_var_accepts_initialization(opts):
         assert type(loaded["OPENAPI_DOCS_KEY"]) is str, \
             f"OPENAPI_DOCS_KEY should load as str, got {type(loaded['OPENAPI_DOCS_KEY']).__name__}"
         assert re.fullmatch(r"[A-Z]{4}-[a-z]{4}", loaded["OPENAPI_DOCS_KEY"]), \
-            f"OPENAPI_DOCS_KEY should load with the expected generated pattern, got {loaded['OPENAPI_DOCS_KEY']!r}"
+            "OPENAPI_DOCS_KEY should load with the expected generated pattern"
 
 
 @th.unit_test("check_var declines without creating VAR_ROOT")

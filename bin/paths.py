@@ -75,6 +75,8 @@ def check_var():
 
             # Create django.conf with secret key
             django_conf = VAR_ROOT / "django.conf"
+            django_conf.touch(mode=0o600, exist_ok=False)
+            django_conf.chmod(0o600)
             secret_key = generate_secret_key()
             docs_key = ''.join(secrets.choice(string.ascii_uppercase) for _ in range(4)) + '-' + \
                        ''.join(secrets.choice(string.ascii_lowercase) for _ in range(4))
