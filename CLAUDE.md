@@ -17,6 +17,21 @@ stuffed into built-in models) throws all of that away. Build **with** the grain.
    - [permissions.md](https://github.com/NativeMojo/django-mojo/blob/main/docs/django_developer/core/permissions.md) + [rest/permissions.md](https://github.com/NativeMojo/django-mojo/blob/main/docs/django_developer/rest/permissions.md)
    - [django_developer/README.md](https://github.com/NativeMojo/django-mojo/blob/main/docs/django_developer/README.md) — index of every built-in app; don't reinvent what exists
 
+## Work Tracking
+
+Work lives on the Maestro board configured by `.claude/maestro.json` (NativeMojo workspace,
+project `django-mojo-skeleton`). Pick the smallest matching workflow:
+
+- File work → `/maestro-task`
+- Investigate and plan an item → `/maestro-scope`
+- Build a planned item → `/maestro-build`
+- Scope and build a batch behind one approval gate → `/maestro-auto`
+- Make a small, low-risk, single-session change → `/maestro-vibe`
+- Draft the next release note → `/maestro-release-note`
+
+If Maestro is unavailable or unauthenticated, say so explicitly. Do not silently switch to a
+different work record.
+
 ## The One Rule That Matters Most
 
 **Domain data gets a real MojoModel.** If your feature has a "thing" (an order, an application, an
