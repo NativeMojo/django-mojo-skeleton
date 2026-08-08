@@ -1,17 +1,23 @@
 #!/bin/bash
-# Harness for `bin/jobman status` (maestro item #1600).
+# Harness for `bin/jobman` as a SHIM (maestro item #1611).
 #
-# Runs the REAL script from a throwaway PROJECT_ROOT — jobman derives its root
-# from $BASH_SOURCE and has no env seam, so isolation comes from copying it into
-# $TMP/proj/bin and letting var/pids land in the temp tree. `pgrep` and `ps` are
-# stubbed on PATH so every process state is a fixture rather than a real fork.
+# The status semantics this file used to cover — ten cases of "extra" versus
+# "unmanaged" instances, including the #1600 regression where a healthy engine
+# was reported as an extra instance of itself — moved into django-mojo along
+# with the logic they describe (`tests/test_deploy/jobman.py`). Coverage went
+# where the code went; what stays here is the contract of the launcher.
 #
-# The property under test: "extra instances detected" must mean strictly more
-# than the one instance jobman manages. On a healthy node the pidfile's own PID
-# is always in the pgrep result, and the pre-fix script reported it as an extra
-# instance of itself. Case 1 is that regression.
+# Three contracts, because each has a caller that breaks if it slips:
 #
-# Assertions are on stdout because jobman's contract IS its stdout.
+#   1. The argv surface is unchanged. /etc/cron.d/3_mojo_jobs runs
+#      `bin/jobman start` every minute and aws/update.sh runs `./bin/jobman stop`.
+#   2. Exit codes pass through. update.sh's stop runs under `set -e`.
+#   3. The shim carries NO logic. The moment a pidfile path, a pgrep pattern or
+#      a status string appears here, this file is a copy again — frozen at the
+#      moment a project downloaded the skeleton, and unreachable by a fix.
+#
+# Contracts 1 and 2 are also exercised for real: `python3` is stubbed on PATH,
+# so the shim runs end to end without django-mojo needing to be importable.
 set -u
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -20,13 +26,15 @@ trap 'rm -rf "$TMP"' EXIT
 
 PROJ="$TMP/proj"
 STUB="$TMP/stubs"
-CTL="$TMP/ctl"
 OUT="$TMP/out.txt"
+CTL="$TMP/ctl"
 export STUBCTL="$CTL"
 
 PASS=0
 FAIL=0
 RC=0
+
+SHIM="$REPO/bin/jobman"
 
 ok()   { PASS=$((PASS+1)); echo "  ok: $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL: $1"; }
@@ -34,176 +42,126 @@ fail() { FAIL=$((FAIL+1)); echo "  FAIL: $1"; }
 assert_eq() {
     if [ "$1" = "$2" ]; then ok "$3"; else fail "$3 (got: $1, want: $2)"; fi
 }
-# exact whole-line match — a line with an extra PID appended does NOT count
-assert_line() {
+assert_has() { # file pattern label
+    if grep -q -- "$2" "$1" 2>/dev/null; then ok "$3"; else fail "$3 (no '$2' in $(basename "$1"))"; fi
+}
+assert_lacks() { # file pattern label
+    if grep -q -- "$2" "$1" 2>/dev/null; then fail "$3 ('$2' present in $(basename "$1"))"; else ok "$3"; fi
+}
+assert_line() { # exact whole line in $OUT
     if grep -qxF "$1" "$OUT" 2>/dev/null; then ok "$2"; else fail "$2 (no exact line '$1')"; fi
 }
-assert_out() {
-    if grep -qF "$1" "$OUT" 2>/dev/null; then ok "$2"; else fail "$2 (no '$1' in output)"; fi
-}
-assert_not_out() {
-    if grep -qF "$1" "$OUT" 2>/dev/null; then fail "$2 ('$1' present)"; else ok "$2"; fi
-}
-assert_line_count() {
-    local got
-    got="$(wc -l < "$OUT" | tr -d ' ')"
-    assert_eq "$got" "$1" "$2"
-}
-
-# ── fixtures ─────────────────────────────────────────────────────────────────
-
-# write_pids <file> <space-separated PIDs, possibly empty>  — one PID per line
-write_pids() {
-    local file="$1" pids="$2" p
-    : > "$file"
-    for p in $pids; do echo "$p" >> "$file"; done
-}
-
-set_alive()     { write_pids "$CTL/alive.txt" "$1"; }            # PIDs `ps -p` reports live
-set_pgrep()     { write_pids "$CTL/pgrep_$1.txt" "$2"; }         # PIDs pgrep -f returns
-write_pidfile() { mkdir -p "$PROJ/var/pids"; echo "$2" > "$PROJ/var/pids/job_$1.pid"; }
 
 setup_case() {
     rm -rf "$PROJ" "$STUB" "$CTL"
     mkdir -p "$PROJ/bin" "$STUB" "$CTL"
-    cp "$REPO/bin/jobman" "$PROJ/bin/jobman"
+    cp "$SHIM" "$PROJ/bin/jobman"
     chmod +x "$PROJ/bin/jobman"
 
-    # default fixture: nothing running anywhere, no pidfiles
-    set_alive ""
-    set_pgrep engine ""
-    set_pgrep scheduler ""
-
-    # pgrep stub — jobman's pattern names the component, so dispatch on argv.
-    # Real pgrep exits 1 with no output when nothing matches; so does this.
-    cat > "$STUB/pgrep" <<'EOF'
+    # python3 stub — prints the argv the shim handed it, one word per line, and
+    # exits with whatever the fixture asks for. The real module is never
+    # imported, so this works on a box with no django-mojo installed.
+    cat > "$STUB/python3" <<'EOF'
 #!/bin/bash
-case "$*" in
-  *scheduler*) f="$STUBCTL/pgrep_scheduler.txt" ;;
-  *engine*)    f="$STUBCTL/pgrep_engine.txt" ;;
-  *)           exit 1 ;;
-esac
-[ -s "$f" ] || exit 1
-cat "$f"
+for a in "$@"; do echo "ARG $a"; done
+echo "CWD $PWD"
+echo "DJANGO_SETTINGS_MODULE ${DJANGO_SETTINGS_MODULE:-unset}"
+echo "OBJC_DISABLE_INITIALIZE_FORK_SAFETY ${OBJC_DISABLE_INITIALIZE_FORK_SAFETY:-unset}"
+[ -f "$STUBCTL/python3.exit" ] && exit "$(cat "$STUBCTL/python3.exit")"
+exit 0
 EOF
-    chmod +x "$STUB/pgrep"
-
-    # ps stub — `ps -p <pid>` succeeds only for a PID the fixture declared alive
-    cat > "$STUB/ps" <<'EOF'
-#!/bin/bash
-pid=""
-while [ $# -gt 0 ]; do
-  if [ "$1" = "-p" ]; then pid="${2:-}"; break; fi
-  shift
-done
-[ -n "$pid" ] || exit 1
-grep -qxF "$pid" "$STUBCTL/alive.txt" 2>/dev/null
-EOF
-    chmod +x "$STUB/ps"
+    chmod +x "$STUB/python3"
 }
 
-run_status() { # [component]
-    ( cd "$TMP" && PATH="$STUB:$PATH" bash "$PROJ/bin/jobman" status "$@" ) > "$OUT" 2>&1
+run_shim() { # args...
+    ( cd "$TMP" && PATH="$STUB:$PATH" bash "$PROJ/bin/jobman" "$@" ) > "$OUT" 2>&1
     RC=$?
 }
 
-# ── tests ────────────────────────────────────────────────────────────────────
+# ── the shim carries no logic ────────────────────────────────────────────────
 
-echo "jobman status: a healthy engine is not an extra instance of itself (regression)"
-setup_case
-write_pidfile engine 1000
-set_alive "1000"
-set_pgrep engine "1000"
-run_status engine
-assert_eq "$RC" 0 "healthy status exits 0"
-assert_line "Engine running (PID 1000)" "healthy engine reports running"
-assert_not_out "extra instances" "the managed PID is never reported as an extra"
-assert_not_out "unmanaged instances" "no unmanaged line while the pidfile is live"
-assert_line_count 1 "healthy engine prints exactly one line"
+echo "bin/jobman: nothing that belongs to the packaged module lives here"
+for pat in "var/pids" "pgrep" "kill -TERM" "kill -KILL" \
+           "extra instances detected" "unmanaged instances detected" \
+           "stale PID file" "nohup"; do
+    assert_lacks "$SHIM" "$pat" "the shim contains no '$pat'"
+done
+# A launcher this small has no room for a case statement or a usage function
+# either — both mean it started re-deriving the surface instead of forwarding it.
+assert_lacks "$SHIM" "^case " "no dispatch of its own"
+assert_lacks "$SHIM" "^usage()" "no usage function of its own"
 
-echo "jobman status: one genuine duplicate is reported, without the managed PID"
-setup_case
-write_pidfile engine 1000
-set_alive "1000 2000"
-set_pgrep engine "1000 2000"
-run_status engine
-assert_line "Engine running (PID 1000)" "status line still names the managed PID"
-assert_line "Engine extra instances detected: 2000" "only the duplicate is listed"
+lines="$(grep -cvE '^[[:space:]]*(#|$)' "$SHIM")"
+if [ "$lines" -le 12 ]; then
+    ok "the shim is $lines lines of code (a launcher, not a program)"
+else
+    fail "the shim has grown to $lines lines of code — logic is creeping back"
+fi
 
-echo "jobman status: two genuine duplicates stay on one space-joined line"
-setup_case
-write_pidfile engine 1000
-set_alive "1000 2000 3000"
-set_pgrep engine "1000 2000 3000"
-run_status engine
-assert_line "Engine running (PID 1000)" "status line still names the managed PID"
-assert_line "Engine extra instances detected: 2000 3000" "both duplicates on a single line"
+echo "bin/jobman: it targets the packaged module, from the project root"
+assert_has "$SHIM" '^exec python3 -m mojo.deploy.jobman --root "\$ROOT" "\$@"$' \
+    "it execs the packaged module with --root and forwards \$@ verbatim"
+assert_has "$SHIM" 'ROOT="\$(cd "\$(dirname "\${BASH_SOURCE\[0\]}")/.." && pwd)"' \
+    "ROOT is derived from BASH_SOURCE, so a cron absolute path resolves right"
+assert_has "$SHIM" '^cd "\$ROOT"$' "and it runs from the project root"
+assert_has "$SHIM" "^export DJANGO_SETTINGS_MODULE=settings$" "settings module exported"
+assert_has "$SHIM" "^export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES$" "macOS fork-safety workaround kept"
+assert_has "$SHIM" "^set -euo pipefail$" "strict mode"
+if [ -x "$SHIM" ]; then ok "bin/jobman is executable"; else fail "bin/jobman is not executable"; fi
 
-echo "jobman status: a stale pidfile with nothing running is silent"
-setup_case
-write_pidfile engine 1000
-set_alive ""
-set_pgrep engine ""
-run_status engine
-assert_line "Engine not running (stale PID file: $PROJ/var/pids/job_engine.pid)" "stale line unchanged"
-assert_not_out "extra instances" "no extra line with nothing running"
-assert_not_out "unmanaged instances" "no unmanaged line with nothing running"
+# ── contract 1: the argv surface is unchanged ────────────────────────────────
 
-echo "jobman status: a stale pidfile plus a live process reports it as unmanaged"
+echo "bin/jobman: every documented invocation reaches the module verbatim"
 setup_case
-write_pidfile engine 1000
-set_alive "2000"
-set_pgrep engine "2000"
-run_status engine
-assert_line "Engine not running (stale PID file: $PROJ/var/pids/job_engine.pid)" "stale line unchanged"
-assert_line "Engine unmanaged instances detected: 2000" "the live process is reported as unmanaged"
-assert_not_out "extra instances" "nothing is 'extra' without a managed instance"
+run_shim status engine
+assert_eq "$RC" 0 "status engine exits 0"
+assert_line "ARG -m" "python3 is invoked in module mode"
+assert_line "ARG mojo.deploy.jobman" "and the module is mojo.deploy.jobman"
+assert_line "ARG --root" "with --root"
+assert_line "ARG $PROJ" "pointed at the project root the shim derived"
+assert_line "ARG status" "the verb is forwarded"
+assert_line "ARG engine" "and so is the component"
+assert_line "CWD $PROJ" "the module runs with the project root as cwd"
+assert_line "DJANGO_SETTINGS_MODULE settings" "the settings module is in the environment"
+assert_line "OBJC_DISABLE_INITIALIZE_FORK_SAFETY YES" "so is the fork-safety workaround"
 
-echo "jobman status: two unmanaged processes stay on one space-joined line"
-setup_case
-write_pidfile engine 1000
-set_alive "2000 3000"
-set_pgrep engine "2000 3000"
-run_status engine
-assert_line "Engine not running (stale PID file: $PROJ/var/pids/job_engine.pid)" "stale line unchanged"
-assert_line "Engine unmanaged instances detected: 2000 3000" "both unmanaged PIDs on a single line"
+# The three verbs, bare and with each component — the full surface the cron and
+# update.sh depend on.
+for verb in start stop status; do
+    for comp in "" engine scheduler; do
+        setup_case
+        # shellcheck disable=SC2086
+        run_shim $verb $comp
+        assert_eq "$RC" 0 "'jobman $verb $comp' exits 0"
+        assert_line "ARG $verb" "'jobman $verb $comp' forwards the verb"
+        if [ -n "$comp" ]; then
+            assert_line "ARG $comp" "'jobman $verb $comp' forwards the component"
+        fi
+    done
+done
 
-echo "jobman status: nothing running at all prints one line"
-setup_case
-run_status engine
-assert_eq "$RC" 0 "not-running status exits 0"
-assert_line "Engine not running" "not-running line unchanged"
-assert_line_count 1 "not-running prints exactly one line"
+# ── contract 2: exit codes pass through ──────────────────────────────────────
 
-echo "jobman status: no pidfile but a live process reports it as unmanaged"
+echo "bin/jobman: the module's exit code is the shim's exit code"
+# update.sh:208 runs `./bin/jobman stop` under `set -e`. A shim that swallowed
+# a failure would turn a dead node into a green deploy.
+for code in 1 3 7; do
+    setup_case
+    echo "$code" > "$CTL/python3.exit"
+    run_shim stop
+    assert_eq "$RC" "$code" "exit $code passes through unchanged"
+done
 setup_case
-set_alive "4000"
-set_pgrep engine "4000"
-run_status engine
-assert_line "Engine not running" "not-running line unchanged"
-assert_line "Engine unmanaged instances detected: 4000" "the untracked process is reported"
+run_shim status
+assert_eq "$RC" 0 "and success is still 0"
 
-echo "jobman status: a bare healthy run prints exactly two lines, one per component"
-setup_case
-write_pidfile engine 1000
-write_pidfile scheduler 1100
-set_alive "1000 1100"
-set_pgrep engine "1000"
-set_pgrep scheduler "1100"
-run_status
-assert_eq "$RC" 0 "bare status exits 0"
-assert_line_count 2 "a healthy node prints exactly two lines"
-assert_line "Engine running (PID 1000)" "engine line present"
-assert_line "Scheduler running (PID 1100)" "scheduler line present"
+# ── the callers still call it by this path ───────────────────────────────────
 
-echo "jobman status: the scheduler gets the same subtraction as the engine"
-setup_case
-write_pidfile scheduler 1100
-set_alive "1100 2200"
-set_pgrep scheduler "1100 2200"
-run_status scheduler
-assert_line "Scheduler running (PID 1100)" "scheduler status line"
-assert_line "Scheduler extra instances detected: 2200" "only the scheduler duplicate is listed"
+echo "the callers still name bin/jobman, not the module"
+# A cron line naming a packaged module would freeze that name in /etc/cron.d on
+# every provisioned node forever — there is no cron-convergence plane. The shim
+# lives in the clone update.sh refreshes on every deploy, so it stays fixable.
+assert_has "$REPO/aws/update.sh" "\./bin/jobman stop" "update.sh stops the engine through the shim"
 
 # ── result ───────────────────────────────────────────────────────────────────
 
