@@ -153,13 +153,14 @@ status_one() {
     return 1
   fi
 
-  local matches
-  matches="$(matching_jobs_pids "$comp" | tr '\n' ' ' | sed 's/ $//')"
+  local matches pid managed others p
+  matches="$(matching_jobs_pids "$comp")"
 
+  managed=""
   if [[ -f "$pidfile" ]]; then
-    local pid
     pid="$(cat "$pidfile" || true)"
     if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then
+      managed="$pid"
       echo "$name running (PID $pid)"
     else
       echo "$name not running (stale PID file: $pidfile)"
@@ -168,8 +169,21 @@ status_one() {
     echo "$name not running"
   fi
 
-  if [[ -n "$matches" ]]; then
-    echo "$name extra instances detected: $matches"
+  others=""
+  for p in $matches; do
+    if [[ -n "$managed" && "$p" == "$managed" ]]; then
+      continue
+    fi
+    others="$others $p"
+  done
+  others="${others# }"
+
+  if [[ -n "$others" ]]; then
+    if [[ -n "$managed" ]]; then
+      echo "$name extra instances detected: $others"
+    else
+      echo "$name unmanaged instances detected: $others"
+    fi
   fi
 }
 
@@ -185,6 +199,12 @@ Examples:
   ./bin/jobman stop              # stop engine & scheduler
   ./bin/jobman status            # show both
   ./bin/jobman stop engine       # stop only engine
+
+Status lines:
+  "extra instances detected"     more than the one instance jobman manages
+  "unmanaged instances detected" a jobs.py process runs but no live pidfile
+Note: the scan covers foreground-mode processes only; daemon-mode engines
+(bin/jobs.py engine start, own pidfile) are outside jobman's management.
 EOF
 }
 
