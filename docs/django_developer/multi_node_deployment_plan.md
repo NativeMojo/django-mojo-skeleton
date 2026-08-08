@@ -324,6 +324,16 @@ convention.
 
 ### 3.7 Migrations
 
+> **SHIPPED, in amended form.** The mechanism this section argued for exists:
+> django-mojo's `migrate_locked` holds the Postgres advisory lock in the same
+> session as `migrate`, `post_deploy.sh --migrate` invokes it, and
+> `var/allow_migrate` is gone. One deliberate change from the text below:
+> migrations run on the **canary run of a deploy**, not unconditionally on
+> every node — the canary proves the release (including its migrations)
+> before the fleet moves. See django-mojo
+> `docs/django_developer/edge/deploy.md` and this repo's
+> `docs/django_developer/deployment/updating.md`.
+
 **Corrected from v1.** Naming the gatekeeper as migration runner is a
 convention, not a lock, and the current script actively hides failure:
 `post_deploy.sh:21` runs `migrate --noinput 2>&1 || true`.
@@ -773,6 +783,13 @@ installation is atomic; two-node staging as a release gate.
 ---
 
 ## 8. Current state, including defects found
+
+> **DATED.** This section describes the deploy path as it stood before the
+> fleet deploy shipped (django-mojo edge deploy plane + this repo's
+> `update.sh`/`post_deploy.sh` rewrite). The `allow_migrate` flag file, the
+> `/api/system/update` broadcast plane and the `|| true` swallowing are gone;
+> see `deployment/updating.md` for the current flow. Kept for the defect
+> record.
 
 **Built and verified:**
 - `aws/terraform/` — VPC, NLB with both target groups, nodes, encrypted Aurora,
