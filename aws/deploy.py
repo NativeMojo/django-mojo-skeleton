@@ -8,10 +8,10 @@ tracks. Build it either way:
     and a volume tier (low/medium/high), and writes the file.
   - By hand: copy aws/deploy.example.json to var/deploy.json and edit it.
     Only DOMAIN is required — everything else falls back to volume-tier
-    defaults (below), and DB_PASSWORD/SYSTEM_UPDATE_TOKEN get generated and
+    defaults (below), and DB_PASSWORD/GITHUB_WEBHOOK_SECRET get generated and
     persisted automatically on first load if you don't set them yourself.
     Add any of these keys to override a specific value: PROJECT, REGION,
-    VOLUME, DB_NAME, DB_USER, DB_PASSWORD, SYSTEM_UPDATE_TOKEN, AWS_KEY,
+    VOLUME, DB_NAME, DB_USER, DB_PASSWORD, GITHUB_WEBHOOK_SECRET, AWS_KEY,
     AWS_SECRET, INSTANCE_TYPE, EC2_COUNT, DB_INSTANCE_CLASS, DB_READER_COUNT,
     CACHE_NODE_TYPE, CACHE_NUM_NODES, USE_NLB, EMAIL_FROM, CUSTOM_AMI_ID,
     PEM_PATH (see pem_file_path() — defaults to aws/{project}-{region}.pem,
@@ -50,7 +50,7 @@ Creates (default full run — see PHASES below for the recommended order):
   7. Network Load Balancer, TCP passthrough on 80/443 (high tier only)
   8. EC2 environment setup (push var/django.conf, clone+deploy app, run migrations)
   9. SES domain verification + DKIM + SNS bounce/complaint/delivery hooks
-  10. GitHub Actions secret (SYSTEM_UPDATE_TOKEN, for .github/workflows/deploy.yml)
+  10. GitHub push webhook (/api/github/deploy/webhook, secret GITHUB_WEBHOOK_SECRET)
   11. Verify — SSH smoke test of nginx/mojo-asgi/jobman/DB/cache on every node
 
 PHASES for multi-node (high tier) — do NOT run these three as one big batch;
@@ -218,7 +218,7 @@ def _generate_password(length=24):
 
 
 def _generate_token(length=40):
-    """Generate a random bearer token (e.g. SYSTEM_UPDATE_TOKEN)."""
+    """Generate a random secret token (e.g. GITHUB_WEBHOOK_SECRET)."""
     import secrets
     return secrets.token_urlsafe(length)
 
@@ -299,7 +299,7 @@ def _run_setup_wizard(existing=None):
         "DB_NAME": existing.get("DB_NAME", "postgres"),
         "DB_USER": existing.get("DB_USER", "postgres"),
         "DB_PASSWORD": existing.get("DB_PASSWORD", _generate_password()),
-        "SYSTEM_UPDATE_TOKEN": existing.get("SYSTEM_UPDATE_TOKEN", _generate_token()),
+        "GITHUB_WEBHOOK_SECRET": existing.get("GITHUB_WEBHOOK_SECRET", _generate_token()),
         "INSTANCE_TYPE": existing.get("INSTANCE_TYPE", tier["INSTANCE_TYPE"]),
         "EC2_COUNT": existing.get("EC2_COUNT", tier["EC2_COUNT"]),
         "DB_INSTANCE_CLASS": existing.get("DB_INSTANCE_CLASS", tier["DB_INSTANCE_CLASS"]),
@@ -341,7 +341,7 @@ def load_deploy_config(force_init=False):
     everything else falls back to volume-tier defaults in _init_config(), or
     can be answered interactively too by leaving it out and letting the
     wizard ask. --init always re-prompts everything, using current values as
-    defaults. The two secrets (DB_PASSWORD, SYSTEM_UPDATE_TOKEN) can't have a
+    defaults. The two secrets (DB_PASSWORD, GITHUB_WEBHOOK_SECRET) can't have a
     static default, so if they're missing here we generate and persist them
     once, rather than silently leaving them blank."""
     existing = _load_json(DEPLOY_JSON)
@@ -352,8 +352,8 @@ def load_deploy_config(force_init=False):
     if not existing.get("DB_PASSWORD"):
         existing["DB_PASSWORD"] = _generate_password()
         changed = True
-    if not existing.get("SYSTEM_UPDATE_TOKEN"):
-        existing["SYSTEM_UPDATE_TOKEN"] = _generate_token()
+    if not existing.get("GITHUB_WEBHOOK_SECRET"):
+        existing["GITHUB_WEBHOOK_SECRET"] = _generate_token()
         changed = True
     if changed:
         _save_json(DEPLOY_JSON, existing)
@@ -368,7 +368,7 @@ PROJECT = ""
 DB_NAME = ""
 DB_USER = ""
 DB_PASSWORD = ""
-SYSTEM_UPDATE_TOKEN = ""
+GITHUB_WEBHOOK_SECRET = ""
 INSTANCE_TYPE = ""
 EC2_COUNT = 1
 DB_INSTANCE_CLASS = ""
@@ -398,7 +398,7 @@ def pem_file_path(region):
 def _init_config(conf):
     """Set module-level config vars from deploy.json values, falling back to the
     volume tier's defaults for anything not explicitly set in the file."""
-    global PROJECT, DB_NAME, DB_USER, DB_PASSWORD, SYSTEM_UPDATE_TOKEN
+    global PROJECT, DB_NAME, DB_USER, DB_PASSWORD, GITHUB_WEBHOOK_SECRET
     global INSTANCE_TYPE, EC2_COUNT, DB_INSTANCE_CLASS, DB_READER_COUNT
     global CACHE_NODE_TYPE, CACHE_NUM_NODES, USE_NLB
     global SES_DOMAIN, SES_FROM_EMAIL, AWS_KEY_CONF, AWS_SECRET_CONF, PEM_PATH_TEMPLATE
@@ -413,7 +413,7 @@ def _init_config(conf):
     DB_NAME = conf.get("DB_NAME", "postgres")
     DB_USER = conf.get("DB_USER", "postgres")
     DB_PASSWORD = conf.get("DB_PASSWORD", "")
-    SYSTEM_UPDATE_TOKEN = conf.get("SYSTEM_UPDATE_TOKEN", "")
+    GITHUB_WEBHOOK_SECRET = conf.get("GITHUB_WEBHOOK_SECRET", "")
     AWS_KEY_CONF = conf.get("AWS_KEY", "")
     AWS_SECRET_CONF = conf.get("AWS_SECRET", "")
     INSTANCE_TYPE = conf.get("INSTANCE_TYPE", tier["INSTANCE_TYPE"])
@@ -1649,7 +1649,7 @@ def write_django_conf(region, db_endpoint, cache_endpoint):
         f'REDIS_SERVER = "{cache_endpoint}"',
         'REDIS_PORT = "6379"',
         f'EMAIL_FROM = "{SES_FROM_EMAIL}"',
-        f'SYSTEM_UPDATE_TOKEN = "{SYSTEM_UPDATE_TOKEN}"',
+        f'GITHUB_WEBHOOK_SECRET = "{GITHUB_WEBHOOK_SECRET}"',
         DJANGO_CONF_END,
     ]
 
@@ -1685,59 +1685,74 @@ def build_ops_json(cert_bucket=None):
 
 
 # ── Step 10: GitHub Actions secret ───────────────────────────────────────────
-def ensure_github_secret(dry_run=False):
-    """Push SYSTEM_UPDATE_TOKEN to the repo as a GitHub Actions secret, for
-    .github/workflows/deploy.yml's fleet-update trigger on push to main.
+def ensure_github_webhook(dry_run=False):
+    """Create the GitHub push webhook that triggers fleet deploys —
+    https://{DOMAIN}/api/github/deploy/webhook, content type json, signed
+    with GITHUB_WEBHOOK_SECRET (which write_django_conf already put in
+    var/django.conf, so every node behind the LB can verify deliveries).
 
     `gh` frequently can't do this even when installed: it's commonly
     authenticated as a personal account with no access to the org/repo being
     deployed (a 404, not an auth prompt — gh gives no signal to tell the two
     apart; see aws/remote_deploy.sh's deploy-key step for the same situation).
     That means the manual fallback below is the normal path here, not a rare
-    edge case, so it always prints the exact secret name + value + UI steps
-    rather than just suggesting "check gh auth status"."""
+    edge case, so it always prints the exact URL + secret + UI steps rather
+    than just suggesting "check gh auth status"."""
     import subprocess
 
     repo = _load_json(DEPLOY_JSON).get("GITHUB_REPO") or _detect_github_repo()
     if not repo:
-        print("  NOTE: couldn't detect a GitHub repo — skipping GitHub Actions secret setup.")
+        print("  NOTE: couldn't detect a GitHub repo — skipping webhook setup.")
         print("        Set GITHUB_REPO in var/deploy.json to override, then re-run this step.")
         return
 
+    hook_url = f"https://{SES_DOMAIN}/api/github/deploy/webhook"
     if dry_run:
-        print(f"  [dry-run] Would set SYSTEM_UPDATE_TOKEN secret on {repo}")
+        print(f"  [dry-run] Would create push webhook {hook_url} on {repo}")
         return
 
     ok = False
     try:
         result = subprocess.run(
-            ["gh", "secret", "set", "SYSTEM_UPDATE_TOKEN", "--repo", repo, "--body", SYSTEM_UPDATE_TOKEN],
+            ["gh", "api", f"repos/{repo}/hooks",
+             "-f", "name=web",
+             "-F", "active=true",
+             "-f", "events[]=push",
+             "-f", f"config[url]={hook_url}",
+             "-f", "config[content_type]=json",
+             "-f", f"config[secret]={GITHUB_WEBHOOK_SECRET}"],
             capture_output=True, text=True, timeout=15,
         )
         ok = result.returncode == 0
         if not ok and result.stderr:
-            print(f"  gh error: {result.stderr.strip()}")
+            stderr = result.stderr.strip()
+            if "Hook already exists" in stderr:
+                print(f"  ✓ Push webhook already exists on {repo} — leaving it alone.")
+                print("    (If its secret is stale, delete it in the repo settings and re-run.)")
+                return
+            print(f"  gh error: {stderr}")
     except FileNotFoundError:
         pass  # gh not installed — fall through to manual instructions
     except Exception as e:
         print(f"  gh error: {e}")
 
     if ok:
-        print(f"  ✓ SYSTEM_UPDATE_TOKEN secret set on {repo} via gh")
+        print(f"  ✓ Push webhook created on {repo} → {hook_url}")
         return
 
     print()
     print("  ==========================================================")
-    print("   GitHub Actions secret needs to be added manually")
+    print("   GitHub push webhook needs to be added manually")
     print("  ==========================================================")
-    print("   gh couldn't set it automatically (not installed, or")
+    print("   gh couldn't create it automatically (not installed, or")
     print(f"   authenticated as an account without access to {repo}).")
     print()
-    print(f"   1. Open: https://github.com/{repo}/settings/secrets/actions")
-    print("   2. Click 'New repository secret'")
-    print("   3. Name:  SYSTEM_UPDATE_TOKEN")
-    print(f"   4. Value: {SYSTEM_UPDATE_TOKEN}")
-    print("   5. Click 'Add secret'")
+    print(f"   1. Open: https://github.com/{repo}/settings/hooks")
+    print("   2. Click 'Add webhook'")
+    print(f"   3. Payload URL:  {hook_url}")
+    print("   4. Content type: application/json")
+    print(f"   5. Secret:       {GITHUB_WEBHOOK_SECRET}")
+    print("   6. Events: 'Just the push event', then 'Add webhook'")
     print("  ==========================================================")
     print()
 
@@ -1820,7 +1835,7 @@ fi
 # Default full run — everything needed to get node1 live. "bake-ami" is
 # deliberately excluded: it's a manual, one-time action you run once node1 is
 # verified, not something a full run should silently redo.
-STEPS = ["sg", "key", "rds", "cache", "ec2", "cert-bucket", "nlb", "ec2-setup", "ses", "github-secret", "verify"]
+STEPS = ["sg", "key", "rds", "cache", "ec2", "cert-bucket", "nlb", "ec2-setup", "ses", "github-webhook", "verify"]
 ALL_STEPS = STEPS + ["bake-ami"]
 
 
@@ -1958,9 +1973,9 @@ def main():
             setup_ses(session, region, dry_run=args.dry_run)
             print()
 
-        elif step == "github-secret":
-            print("── Step 11: GitHub Actions Secret ──")
-            ensure_github_secret(dry_run=args.dry_run)
+        elif step == "github-webhook":
+            print("── Step 11: GitHub Deploy Webhook ──")
+            ensure_github_webhook(dry_run=args.dry_run)
             print()
 
         elif step == "verify":
