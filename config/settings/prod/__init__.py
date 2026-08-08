@@ -21,3 +21,16 @@ LOGIT_ALWAYS_LOG_PREFIX = ['POST:/api/user/', 'POST:/api/group/', 'POST:/api/log
 LOGIT_ASYNC_LOGGING = True
 
 MOJO_APP_STATUS_200_ON_ERROR = False
+
+# ── Fleet code deploy (django-mojo edge deploy plane) ────────────────────────
+# Prod profile ONLY, on purpose: django-mojo ships no EDGE_DEPLOY_SCRIPT
+# default so an unconfigured box (dev laptop, CI) refuses to run a deploy —
+# putting this in defaults/ would arm every checkout. Read with get_static,
+# so a DB Setting row can never control the argv. No sudo wrapper: the job
+# engine runs as ec2-user, which owns the clone; update.sh sudos
+# post_deploy.sh itself.
+EDGE_DEPLOY_SCRIPT = ["/opt/api/aws/update.sh"]
+EDGE_DEPLOY_BRANCH = "main"
+# This deployment installs mojo.apps.edge for the DEPLOY plane only — nginx
+# is owned by aws/post_deploy.sh, not the edge vhost-convergence sweep.
+EDGE_CONVERGE_ENABLED = False
