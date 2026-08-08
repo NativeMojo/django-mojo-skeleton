@@ -78,7 +78,8 @@ done
 # there the failure is a line that still tells somebody to RUN one.
 
 echo "no code or config file references a deleted script"
-hits="$(grep -rn --exclude=test_node_plane.sh --exclude='*.md' -E "$NAME_RE" \
+hits="$(grep -rn --exclude=test_node_plane.sh --exclude='*.md' \
+        --exclude-dir=__pycache__ -I -E "$NAME_RE" \
         "$REPO/aws" "$REPO/bin" "$REPO/config" "$REPO/tests" 2>/dev/null)"
 if [ -z "$hits" ]; then
     ok "aws/ bin/ config/ tests/ name none of the deleted files"
