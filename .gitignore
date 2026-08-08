@@ -37,3 +37,4 @@ aws/*.pem
 
 # Claude Code
 .claude/settings.local.json
+planning/.cache/
