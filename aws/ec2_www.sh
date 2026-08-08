@@ -330,16 +330,40 @@ log "Installing base Python packages..."
 pip install \
     "psycopg[binary]" \
     "uvicorn[standard]" \
-    django-mojo \
-    certbot-nginx
+    django-mojo
+
+# ── Certbot, in its own venv ──────────────────────────────────────────────────
+# certbot shares NOTHING with the application: co-installed, any project pin
+# lands in the same interpreter, and a newer cryptography is enough to break
+# certbot's pyOpenSSL — after which `renew --quiet` fails silently until the
+# certificate expires. Separate venv, separate dependency graph.
+#
+# --without-pip plus the same get-pip pattern used for the system pip above:
+# AL2023 splits ensurepip's bundled wheels into their own RPM that the dnf
+# list doesn't install, and a venv failure here would abort the whole
+# bootstrap under `set -euo pipefail`. This way the distro's ensurepip
+# packaging doesn't matter.
+log "Installing certbot in its own venv (/opt/certbot)..."
+python${PYTHON_VER} -m venv --without-pip /opt/certbot
+retry bash -c "curl -fsSL https://bootstrap.pypa.io/get-pip.py | /opt/certbot/bin/python"
+/opt/certbot/bin/pip install certbot certbot-nginx
+ln -snf /opt/certbot/bin/certbot /usr/local/bin/certbot
 
 ln -snf /usr/local/bin/certbot /usr/bin/certbot
 
 # ── Cron jobs ─────────────────────────────────────────────────────────────────
 log "Installing cron jobs..."
+# PATH matches the project crons (3_mojo_jobs) — /usr/local/bin is where
+# certbot's venv symlink lives. Consistency and one less crutch: the
+# /usr/bin/certbot symlink above already makes certbot resolvable here.
+#
+# Plain renew, because bootstrap runs BEFORE the repo is cloned and cannot
+# reference /opt/api. aws/ec2_deploy.sh overwrites this cron with the
+# role-aware certbot_sync.py --renew form in the same block that installs the
+# pull cron — so a node that has a synced lineage always has the gated renew.
 cat > /etc/cron.d/1_certbot <<'EOF'
 SHELL=/bin/bash
-PATH=/sbin:/bin:/usr/sbin:/usr/bin
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 0 6 * * 0 root certbot renew --post-hook "systemctl reload nginx" --quiet
 EOF
 

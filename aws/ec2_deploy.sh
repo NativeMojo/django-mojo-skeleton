@@ -108,27 +108,46 @@ fi
 # ── Project cron jobs ───────────────────────────────────��────────────────────
 log "Installing project cron jobs..."
 
+# Every cron below redirects into var/logs, so it has to exist first.
+# Ownership is set at the end, once the whole var tree is in place.
+mkdir -p "${PROJ_PATH}/var/logs" "${PROJ_PATH}/var/pids" "${PROJ_PATH}/var/keys"
+
 cat > /etc/cron.d/3_mojo_jobs <<EOF
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 * * * * * ec2-user ${PROJ_PATH}/bin/jobman start >> ${PROJ_PATH}/var/logs/jobman.log 2>&1
 EOF
 
-# No-op on single-node deploys (aws/certbot_sync.py exits quietly if
-# var/ops.json is missing or AWS_CERT_BUCKET/LOAD_BALANCER_DOMAIN/
-# PRIMARY_BALANCER_HOST aren't set in it). Needs root: reads privkey.pem
-# (600) and reloads nginx.
+# No-op on single-node deploys (aws/certbot_sync.py exits quietly when
+# AWS_CERT_BUCKET/LOAD_BALANCER_DOMAIN/PRIMARY_BALANCER_HOST aren't set in
+# var/django.conf — the key=value file it reads, never var/ops.json). Needs
+# root: reads privkey.pem (600) and reloads nginx.
 cat > /etc/cron.d/4_certbot_sync <<EOF
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 */5 * * * * root python3 ${PROJ_PATH}/aws/certbot_sync.py >> ${PROJ_PATH}/var/logs/certbot_sync.log 2>&1
 EOF
 
+# Overwrites the plain weekly `certbot renew` cron ec2_bootstrap.sh installs,
+# and it lives HERE, next to the pull tick above, on purpose: the pull is what
+# creates a synced lineage (regular files, not certbot's symlinks into
+# archive/), and certbot renewing against one of those corrupts it. Hazard and
+# gate are installed by the same block of the same run, so a node can never
+# have the first without the second.
+#
+# An unconfigured box still renews itself exactly as before; on a configured
+# fleet only PRIMARY_BALANCER_HOST renews, and a fresh certificate is pushed to
+# the bucket in the same run rather than waiting for the next tick.
+cat > /etc/cron.d/1_certbot <<EOF
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 8 * * * root python3 ${PROJ_PATH}/aws/certbot_sync.py --renew >> ${PROJ_PATH}/var/logs/certbot_sync.log 2>&1
+EOF
+
 # ── Var directories ───────────────────────────────────────────────────────────
 # ec2-user owns (writes logs, pids, config), www group reads (uvicorn/nginx)
 # setgid (2xxx) ensures new files/dirs inherit the www group
 log "Setting var directory ownership..."
-mkdir -p "${PROJ_PATH}/var/logs" "${PROJ_PATH}/var/pids" "${PROJ_PATH}/var/keys"
 chown -R ec2-user:www "${PROJ_PATH}/var"
 find "${PROJ_PATH}/var" -type d -exec chmod 2775 {} \;
 find "${PROJ_PATH}/var" -type f -exec chmod 0664 {} \;
@@ -140,14 +159,21 @@ log "Remaining steps:"
 log "  1. echo 'prod' > ${PROJ_PATH}/var/profile"
 log "  2. Edit ${PROJ_PATH}/var/django.conf with DB/cache/AWS credentials"
 log "  3. python3 ${PROJ_PATH}/bin/manage.py migrate"
-PRIMARY_HOST=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('PRIMARY_BALANCER_HOST',''))" \
-    "${PROJ_PATH}/var/ops.json" 2>/dev/null || true)
+# From var/django.conf, the key=value file certbot_sync.py itself reads. The
+# file legitimately does not exist yet in the manual flow (step 2 above tells
+# the operator to create it), so this must not abort under `set -euo pipefail`.
+PRIMARY_HOST=$(sed -n 's/^ *PRIMARY_BALANCER_HOST *= *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' \
+    "${PROJ_PATH}/var/django.conf" 2>/dev/null | tail -1 || true)
 if [[ -n "$PRIMARY_HOST" ]]; then
     if [[ "$(hostname)" == "$PRIMARY_HOST" ]]; then
-        log "  4. sudo certbot --nginx -d yourdomain.com   (this IS the primary node — run certbot here)"
+        log "  4. sudo certbot certonly --webroot -w /var/www/certbot -d <domain>   (this IS the primary node)"
+        log "     Then set the two ssl_certificate* lines in the vhost by hand. Do NOT use --nginx on a"
+        log "     fleet: it injects an options-ssl-nginx.conf include that only exists where certbot ran,"
+        log "     so nginx -t fails on every replica the vhost is copied to."
     else
         log "  4. Do NOT run certbot on this node — it's not PRIMARY_BALANCER_HOST ($PRIMARY_HOST)."
         log "     aws/certbot_sync.py (cron, every 5 min) will pull the cert from S3 once the primary issues it."
+        log "     Renewal is the primary's job too — its 1_certbot cron runs certbot_sync.py --renew daily."
     fi
 else
     log "  4. sudo certbot --nginx -d yourdomain.com"

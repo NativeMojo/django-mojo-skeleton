@@ -71,12 +71,17 @@ each has a manual checkpoint before the next:
     # Saves the resulting AMI as CUSTOM_AMI_ID in var/deploy.json.
 
   Phase 3 — Scale out from the AMI (bump EC2_COUNT in var/deploy.json first):
-    python aws/deploy.py --step ec2      # new nodes launch from CUSTOM_AMI_ID,
-                                          # skip the full bootstrap, only set
-                                          # their own hostname via user-data
-    python aws/deploy.py --step nlb      # registers the new node(s) — safe to
-                                          # re-run, only registers what's missing
+    python aws/deploy.py                 # a BARE full run, not --step ec2/nlb
     python aws/deploy.py --step verify
+    # Why the full run: every step is get-or-create, so it costs nothing to
+    # re-run and it is the only thing that delivers the whole fleet. It
+    # re-derives the DB/cache endpoints (setup_rds/setup_cache), which is what
+    # lets it rewrite var/django.conf — now EC2_COUNT > 1, so the conf gains
+    # the cert-plane keys aws/certbot_sync.py reads — creates the cert bucket,
+    # launches the missing nodes from CUSTOM_AMI_ID (hostname-only user-data),
+    # registers them with the NLB, and pushes the new conf to EVERY node.
+    # `--step ec2` + `--step nlb` do none of the conf, push, or bucket work,
+    # so a fleet scaled out that way can never arm cert sync.
 
 Usage:
   python aws/deploy.py                    # Interactive - all steps
@@ -1171,9 +1176,11 @@ rm -f /opt/api/var/pids/*.pid
     _save_json(DEPLOY_JSON, conf)
     print(f"  ✓ Saved CUSTOM_AMI_ID={ami_id} to {DEPLOY_JSON}")
     print(f"\n  To scale out: bump EC2_COUNT in {DEPLOY_JSON}, then run:")
-    print(f"    python aws/deploy.py --step ec2       # new nodes launch from this AMI (hostname-only setup)")
-    print(f"    python aws/deploy.py --step nlb       # registers the new node(s) with the load balancer")
+    print(f"    python aws/deploy.py                  # BARE full run — every step is get-or-create")
     print(f"    python aws/deploy.py --step verify")
+    print(f"  The full run is what launches the new nodes from this AMI, creates the cert")
+    print(f"  bucket, rewrites var/django.conf fleet-shaped (cert-plane keys included), and")
+    print(f"  pushes it to every node. --step ec2/--step nlb alone deliver none of that.")
     return ami_id
 
 
@@ -1628,9 +1635,12 @@ def write_django_conf(region, db_endpoint, cache_endpoint):
     AWS_KEY/AWS_SECRET come from var/deploy.json (see load_credentials()) and
     get copied in here too, since the *deployed app* needs them as real
     settings (S3/SES, etc) even though deploy.py's own boto3 calls don't read
-    them from this file. LOAD_BALANCER_DOMAIN/PRIMARY_BALANCER_HOST/
-    AWS_CERT_BUCKET are deploy/ops metadata the app itself never reads —
-    those live in var/ops.json instead (see build_ops_json())."""
+    them from this file. The cert-plane keys (LOAD_BALANCER_DOMAIN/
+    PRIMARY_BALANCER_HOST/AWS_CERT_BUCKET) go in here too on multi-node
+    deploys: aws/certbot_sync.py and aws/check_setup.py read THIS file
+    (key=value), never var/ops.json — an earlier version of this docstring
+    claimed otherwise, and a fleet provisioned by deploy.py could never arm
+    cert sync at all."""
     lines = []
     if os.path.exists(DJANGO_CONF):
         with open(DJANGO_CONF) as f:
@@ -1650,8 +1660,17 @@ def write_django_conf(region, db_endpoint, cache_endpoint):
         'REDIS_PORT = "6379"',
         f'EMAIL_FROM = "{SES_FROM_EMAIL}"',
         f'GITHUB_WEBHOOK_SECRET = "{GITHUB_WEBHOOK_SECRET}"',
-        DJANGO_CONF_END,
     ]
+    # Multi-node only. A single-node conf carrying AWS_CERT_BUCKET would arm
+    # check_setup.py's cert-bucket audit against a bucket nothing created,
+    # and certbot_sync.py is meant to stay dormant there.
+    if EC2_COUNT > 1:
+        block += [
+            f'LOAD_BALANCER_DOMAIN = "{SES_DOMAIN}"',
+            f'PRIMARY_BALANCER_HOST = "{_node_hostname(1)}"',
+            f'AWS_CERT_BUCKET = "{PROJECT}-certs"',
+        ]
+    block.append(DJANGO_CONF_END)
 
     if DJANGO_CONF_BEGIN in lines:
         start = lines.index(DJANGO_CONF_BEGIN)
@@ -1671,9 +1690,11 @@ def write_django_conf(region, db_endpoint, cache_endpoint):
 
 
 def build_ops_json(cert_bucket=None):
-    """Deploy/ops metadata pushed to every node as var/ops.json — read by
-    aws/certbot_sync.py and ec2_deploy.sh's certbot messaging. Not Django
-    settings (see write_django_conf) since the app itself never reads these.
+    """Operator-reference copy of the cert-plane values, pushed as
+    var/ops.json. NOTHING reads this file — aws/certbot_sync.py, check_setup.py
+    and ec2_deploy.sh all read the same keys from var/django.conf, where
+    write_django_conf() now also puts them. Kept only so an operator on the box
+    can see the fleet shape without opening the conf.
     Returns None for single-node deploys — nothing to sync, no file needed."""
     if EC2_COUNT <= 1:
         return None

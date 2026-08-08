@@ -43,7 +43,9 @@ second node exists, and then takes that node's TLS down.
   * The downloaded key is checked against the downloaded cert BEFORE either is
     installed, by comparing public keys. A mismatched pair is discarded and the
     node keeps serving what it has.
-  * Install is os.replace() per file — atomic per file — and privkey lands 0600.
+  * Install is os.replace() per file — atomic per file, PROVIDED the staging
+    directory shares a filesystem with /etc/letsencrypt, which is why staging
+    happens there and never in /tmp (see pull()) — and privkey lands 0600.
   * nginx is config-tested before reload, so a bad state aborts instead of
     taking the node's TLS down.
 
@@ -87,7 +89,12 @@ import tempfile
 # rather than tracebacking every minute if boto3 is not installed.
 
 CONFIG_PATH = "/opt/api/var/django.conf"
-LOCK_PATH = "/var/run/certbot_sync.lock"
+LETSENCRYPT_DIR = "/etc/letsencrypt"
+
+# Overridable only so the test harness can point the lock somewhere it can
+# actually write — acquire_lock() opens this for writing, which needs root.
+# The production default is unchanged.
+LOCK_PATH = os.environ.get("CERTBOT_SYNC_LOCK", "/var/run/certbot_sync.lock")
 
 # EVERYTHING in the lineage, not a chosen subset. Different nginx configs
 # reference different members of it — `ssl_certificate` may point at
@@ -147,7 +154,9 @@ def read_config(path):
 
 
 def lineage_dir(domain):
-    return os.path.join("/etc/letsencrypt/live", domain)
+    # Derived from LETSENCRYPT_DIR, not spelled out again, so the destination
+    # and the staging directory below cannot drift onto different filesystems.
+    return os.path.join(LETSENCRYPT_DIR, "live", domain)
 
 
 def s3_key_for(domain, filename):
@@ -380,7 +389,14 @@ def pull(s3, bucket, domain, dry_run):
 
     os.makedirs(directory, mode=0o700, exist_ok=True)
     staged = {}
-    staging_dir = tempfile.mkdtemp(prefix="certbot_sync.", dir="/tmp")
+    # Stage NEXT TO the destination, never in /tmp: AL2023 mounts /tmp as
+    # tmpfs, so os.replace() into /etc/letsencrypt crosses a filesystem and
+    # raises EXDEV — which made every pull fail forever while logging only
+    # "filesystem error". Same filesystem = the rename really is atomic. The
+    # leading dot also keeps a stray staging dir from reading like a lineage,
+    # and keeps the downloaded privkey out of world-traversable /tmp until
+    # install_file() chmods it 0600.
+    staging_dir = tempfile.mkdtemp(prefix=".certbot_sync.", dir=LETSENCRYPT_DIR)
     try:
         for name in LINEAGE_FILES:
             temp_path = os.path.join(staging_dir, name)
@@ -463,6 +479,71 @@ def acquire_lock():
     return handle
 
 
+def find_certbot():
+    """Where certbot lives.
+
+    The provisioning scripts install certbot in its own venv (/opt/certbot,
+    symlinked to /usr/local/bin/certbot) precisely so the app's dependency
+    pins cannot break it — co-installed, a project pinning a newer
+    cryptography breaks certbot's pyOpenSSL and `renew --quiet` then fails
+    silently until the certificate expires. PATH first, so a box that
+    installed it elsewhere still works.
+    """
+    import shutil
+    return shutil.which("certbot") or "/usr/local/bin/certbot"
+
+
+def renew(config, dry_run):
+    """`--renew` mode: the daily renewal attempt, role-aware.
+
+    Unconfigured box (no cert plane): plain renew, no push — single-node
+    behavior, every node renews itself, exactly what the pre-fleet cron did.
+    Configured replica: skip. Renewal is the primary's job; replicas only
+    ever pull. A replica running certbot against a synced lineage would
+    corrupt it (the pull installs regular files, not certbot's symlinks
+    into archive/).
+    Configured primary: renew, then push immediately so a fresh certificate
+    reaches the fleet bucket in the same run instead of waiting for a tick.
+
+    EVERY path logs exactly one line, success included. The old weekly cron
+    ran `certbot renew --quiet` and said nothing on success OR failure, so a
+    broken certbot looked identical to a healthy one for the forty days it
+    took the certificate to expire. This log is a positive heartbeat —
+    cron mail on these boxes goes nowhere.
+    """
+    bucket = config.get("AWS_CERT_BUCKET")
+    domain = config.get("LOAD_BALANCER_DOMAIN")
+    primary = config.get("PRIMARY_BALANCER_HOST")
+    configured = bool(bucket and domain)
+
+    if configured and not is_primary(primary):
+        log.info("replica node — renewal is the primary's job, skipping")
+        return 0
+
+    argv = [find_certbot(), "renew",
+            "--post-hook", "systemctl reload nginx", "--quiet"]
+    if dry_run:
+        log.info("[dry-run] would run: %s", " ".join(argv))
+    else:
+        done = subprocess.run(argv, capture_output=True)
+        if done.returncode != 0:
+            log.error("renew failed rc %d: %s", done.returncode,
+                      (done.stderr or done.stdout or b"").decode(
+                          "utf-8", "replace").strip()[-800:])
+            return 1
+        if configured:
+            log.info("renew ok (this node is the primary) — pushing to S3")
+        else:
+            log.info("renew ok (single-node box — nothing to publish)")
+
+    # Returns before build_s3_client() on a single-node box, so boto3 is
+    # never imported there — same lazy-import property as the sync path.
+    if not configured:
+        return 0
+    s3 = build_s3_client(config)
+    return push(s3, bucket, domain, dry_run)
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dry-run", action="store_true",
@@ -470,6 +551,9 @@ def main(argv):
     parser.add_argument("--verbose", action="store_true",
                         help="log the no-op path too (default logs only changes)")
     parser.add_argument("--config", default=CONFIG_PATH)
+    parser.add_argument("--renew", action="store_true",
+                        help="run the daily certbot renew (primary-gated when "
+                             "the cert plane is configured), then push")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -481,6 +565,32 @@ def main(argv):
     bucket = config.get("AWS_CERT_BUCKET")
     domain = config.get("LOAD_BALANCER_DOMAIN")
     primary = config.get("PRIMARY_BALANCER_HOST")
+
+    # BEFORE the dormant gate below: renew has its own gating, because an
+    # unconfigured box must still renew its own certificate.
+    if args.renew:
+        if bucket and domain and not primary:
+            log.error("PRIMARY_BALANCER_HOST unset but AWS_CERT_BUCKET is set — "
+                      "refusing to guess which node renews")
+            return 1
+        lock = acquire_lock()
+        if lock is None:
+            log.info("another certbot_sync is running — skipping this renew")
+            return 0
+        try:
+            return renew(config, args.dry_run)
+        except OSError as err:
+            log.error("renew failed: %s", err)
+            return 1
+        except Exception as err:
+            # The push leg's botocore exceptions are imported lazily past the
+            # config gate, so they cannot be named in this except clause. A
+            # cron must log one line, never traceback.
+            log.error("renew/push failed: %s: %s", type(err).__name__, err)
+            return 1
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            lock.close()
 
     # Unconfigured is not an error — it is a single-node box. Exit 0 so this can
     # be installed in the base image and stay dormant until a fleet exists.
