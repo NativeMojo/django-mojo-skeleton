@@ -38,7 +38,7 @@ Volume tiers (edit var/deploy.json to override any value):
   low     1x t3.small EC2, Aurora db.t3.medium (writer only), Valkey cache.t4g.small x1
   medium  1x t3.medium EC2, Aurora db.t3.medium (1 writer + 1 reader), Valkey cache.t3.medium x2
   high    2x t3.medium EC2 behind an NLB, Aurora db.t3.medium (1 writer + 2 readers),
-          Valkey cache.t3.medium x3, S3 bucket for cross-node cert sync
+          Valkey cache.t3.medium x3
 
 Creates (default full run — see PHASES below for the recommended order):
   1. Security groups (node: 22/80/443 open; rds + cache: node-SG only, no public access)
@@ -46,19 +46,23 @@ Creates (default full run — see PHASES below for the recommended order):
   3. Aurora PostgreSQL cluster (db "postgres", user "postgres", random password)
   4. ElastiCache Valkey replication group (cluster mode disabled, not serverless)
   5. EC2 instance(s) with Elastic IPs (barebones AL2023, bootstrapped via user_data)
-  6. S3 bucket for aws/certbot_sync.py (multi-node tiers only)
-  7. Network Load Balancer, TCP passthrough on 80/443 (high tier only)
-  8. EC2 environment setup (push var/django.conf, clone+deploy app, run migrations)
-  9. SES domain verification + DKIM + SNS bounce/complaint/delivery hooks
-  10. GitHub push webhook (/api/github/deploy/webhook, secret GITHUB_WEBHOOK_SECRET)
-  11. Verify — SSH smoke test of nginx/mojo-asgi/jobman/DB/cache on every node
+  6. Network Load Balancer, TCP passthrough on 80/443 (high tier only)
+  7. EC2 environment setup (push var/django.conf, clone+deploy app, run migrations)
+  8. SES domain verification + DKIM + SNS bounce/complaint/delivery hooks
+  9. GitHub push webhook (/api/github/deploy/webhook, secret GITHUB_WEBHOOK_SECRET)
+  10. Verify — SSH smoke test of nginx/mojo-asgi/jobman/DB/cache on every node
+
+Certificates are NOT provisioned here. On a fleet they are issued by dnsman and
+installed per node by the mojo.apps.edge generation plane; on a single node it
+is plain `certbot --nginx`. Either way there is nothing for this script to
+create — see docs/django_developer/deployment/provisioning.md.
 
 PHASES for multi-node (high tier) — do NOT run these three as one big batch;
 each has a manual checkpoint before the next:
 
   Phase 1 — Build node1 by hand (tier low/medium, EC2_COUNT=1):
-    python aws/deploy.py                 # runs steps 1-10 above end to end
-    ... manually run certbot on node1 (it's about to become PRIMARY_BALANCER_HOST) ...
+    python aws/deploy.py                 # runs steps 1-9 above end to end
+    ... get node1 a certificate (certbot --nginx, or dnsman + edge) ...
     python aws/deploy.py --step verify   # confirm everything is actually green
 
   Phase 2 — Bake the golden AMI (--step bake-ami, NOT part of the default run —
@@ -76,12 +80,11 @@ each has a manual checkpoint before the next:
     # Why the full run: every step is get-or-create, so it costs nothing to
     # re-run and it is the only thing that delivers the whole fleet. It
     # re-derives the DB/cache endpoints (setup_rds/setup_cache), which is what
-    # lets it rewrite var/django.conf — now EC2_COUNT > 1, so the conf gains
-    # the cert-plane keys aws/certbot_sync.py reads — creates the cert bucket,
-    # launches the missing nodes from CUSTOM_AMI_ID (hostname-only user-data),
-    # registers them with the NLB, and pushes the new conf to EVERY node.
-    # `--step ec2` + `--step nlb` do none of the conf, push, or bucket work,
-    # so a fleet scaled out that way can never arm cert sync.
+    # lets it rewrite var/django.conf, launches the missing nodes from
+    # CUSTOM_AMI_ID (hostname-only user-data), registers them with the NLB,
+    # and pushes the new conf to EVERY node. `--step ec2` + `--step nlb` do
+    # none of the conf or push work, so a fleet scaled out that way runs on
+    # whatever config each node happened to boot with.
 
 Usage:
   python aws/deploy.py                    # Interactive - all steps
@@ -783,7 +786,7 @@ def setup_cache(session, vpc_id, sg_id, dry_run=False):
 
 # ── Step 5: EC2 Instance(s) ────────────────────────────────────────────────────
 def _node_hostname(i):
-    """Hostname set on node i via TARGET_HOSTNAME — node 1 doubles as PRIMARY_BALANCER_HOST."""
+    """Hostname set on node i via TARGET_HOSTNAME."""
     return f"{PROJECT}-node{i}"
 
 
@@ -938,53 +941,6 @@ curl -fsSL https://gist.githubusercontent.com/iamojo/6b422432719106aef8d713fb9a2
     return nodes
 
 
-# ── Step 6: Cert bucket (multi-node cert sync via aws/certbot_sync.py) ────────
-def setup_cert_bucket(session, dry_run=False):
-    """Private S3 bucket aws/certbot_sync.py uses to share node1's Let's Encrypt
-    cert with the rest of the fleet. Only needed when there's more than one node."""
-    if EC2_COUNT <= 1:
-        print("  Single node — no cert bucket needed (skipping).")
-        return None
-
-    from botocore.exceptions import ClientError
-    s3 = session.client("s3")
-    bucket = f"{PROJECT}-certs"
-
-    try:
-        s3.head_bucket(Bucket=bucket)
-        print(f"  ✓ Bucket '{bucket}' already exists")
-        return bucket
-    except ClientError as e:
-        if e.response.get("Error", {}).get("Code") not in ("404", "NoSuchBucket"):
-            raise
-
-    if dry_run:
-        print(f"  [dry-run] Would create private, encrypted S3 bucket: {bucket}")
-        return bucket
-
-    print(f"  Creating S3 bucket '{bucket}' for cert sync...")
-    region = session.region_name
-    create_kwargs = {"Bucket": bucket}
-    if region != "us-east-1":
-        create_kwargs["CreateBucketConfiguration"] = {"LocationConstraint": region}
-    s3.create_bucket(**create_kwargs)
-    s3.put_public_access_block(
-        Bucket=bucket,
-        PublicAccessBlockConfiguration={
-            "BlockPublicAcls": True, "IgnorePublicAcls": True,
-            "BlockPublicPolicy": True, "RestrictPublicBuckets": True,
-        },
-    )
-    s3.put_bucket_encryption(
-        Bucket=bucket,
-        ServerSideEncryptionConfiguration={
-            "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]
-        },
-    )
-    print(f"  ✓ Created private, encrypted bucket: {bucket}")
-    return bucket
-
-
 def _register_missing_targets(elbv2, nodes, dry_run=False):
     """Register any node not already in the target groups — lets scale-out
     (more nodes launched from the golden AMI) join an already-created NLB."""
@@ -1009,10 +965,11 @@ def _register_missing_targets(elbv2, nodes, dry_run=False):
         print(f"  ✓ Registered {len(missing)} new node(s) in {tg_name}")
 
 
-# ── Step 7: Network Load Balancer (TCP passthrough, high tier only) ──────────
+# ── Step 6: Network Load Balancer (TCP passthrough, high tier only) ──────────
 def setup_nlb(session, vpc_id, nodes, dry_run=False):
     """Simple TCP-passthrough NLB across all nodes — TLS is still terminated by
-    nginx on each node (see aws/certbot_sync.py for keeping certs in sync)."""
+    nginx on each node (certificates are installed per node by the dnsman/edge
+    generation plane)."""
     if not USE_NLB:
         print("  USE_NLB is False for this tier — skipping.")
         return None
@@ -1098,11 +1055,11 @@ def _find_nodes(session):
     return nodes
 
 
-# ── Step 8: Bake golden AMI (manual — run once node1 is fully verified) ──────
+# ── Bake golden AMI (manual — run once node1 is fully verified, no --step number) ──
 def bake_ami(session, region, dry_run=False):
-    """Snapshot node1 (always nodes[0] — the PRIMARY_BALANCER_HOST) into a
-    reusable AMI so scale-out nodes launch fast from setup_ec2() instead of
-    re-running the full system bootstrap.
+    """Snapshot node1 (always nodes[0]) into a reusable AMI so scale-out nodes
+    launch fast from setup_ec2() instead of re-running the full system
+    bootstrap.
 
     Deliberately does NOT touch cloud-init state or /etc/machine-id on node1
     before imaging — node1 is the live, already-running box, not a disposable
@@ -1184,11 +1141,10 @@ rm -f /opt/api/var/pids/*.pid
     return ami_id
 
 
-# ── Step 9: EC2 Setup (SSH in and configure) ─────────────────────────────────
-def setup_ec2_environment(session, region, cert_bucket=None, dry_run=False):
-    """For every node: push var/django.conf (+ var/ops.json on multi-node
-    tiers), clone/pull the app repo via aws/remote_deploy.sh, then run
-    migrations once from node 1 only."""
+# ── Step 7: EC2 Setup (SSH in and configure) ─────────────────────────────────
+def setup_ec2_environment(session, region, dry_run=False):
+    """For every node: push var/django.conf, clone/pull the app repo via
+    aws/remote_deploy.sh, then run migrations once from node 1 only."""
     nodes = _find_nodes(session)
     if not nodes:
         print("  ERROR: No running instance(s) found. Run --step ec2 first.")
@@ -1207,11 +1163,10 @@ def setup_ec2_environment(session, region, cert_bucket=None, dry_run=False):
 
     repo = _load_json(DEPLOY_JSON).get("GITHUB_REPO") or _detect_github_repo() or ""
     remote_deploy_sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "remote_deploy.sh")
-    ops = build_ops_json(cert_bucket=cert_bucket)
 
     if dry_run:
         for n in nodes:
-            print(f"  [dry-run] Would push var/django.conf{' + var/ops.json' if ops else ''}"
+            print(f"  [dry-run] Would push var/django.conf"
                   f" to {n['elastic_ip']} and run remote_deploy.sh"
                   f"{f' --repo {repo}' if repo else ' (no --repo set — clone/deploy skipped, bootstrap only)'}")
         print("  [dry-run] Would run migrations from node 1 only")
@@ -1223,13 +1178,6 @@ def setup_ec2_environment(session, region, cert_bucket=None, dry_run=False):
         print("        auto-cloned. Set GITHUB_REPO in var/deploy.json to override, or clone manually.")
 
     import subprocess
-    import tempfile
-
-    ops_file = None
-    if ops:
-        fd, ops_file = tempfile.mkstemp(suffix=".json")
-        with os.fdopen(fd, "w") as f:
-            json.dump(ops, f, indent=2)
 
     for n in nodes:
         ip = n["elastic_ip"]
@@ -1264,20 +1212,6 @@ def setup_ec2_environment(session, region, cert_bucket=None, dry_run=False):
             check=True,
         )
 
-        if ops_file:
-            print("  Pushing var/ops.json (cert sync metadata)...")
-            subprocess.run(
-                ["scp", "-i", pem_file, "-o", "StrictHostKeyChecking=no", ops_file,
-                 f"ec2-user@{ip}:/tmp/ops.json"],
-                check=True,
-            )
-            subprocess.run(
-                ["ssh", "-i", pem_file, "-o", "StrictHostKeyChecking=no", f"ec2-user@{ip}",
-                 "sudo mv /tmp/ops.json /opt/api/var/ops.json "
-                 "&& sudo chown ec2-user:www /opt/api/var/ops.json"],
-                check=True,
-            )
-
         # --skip-bootstrap: setup_ec2()'s user_data already handled it (or it's
         # baked into a golden AMI) — see the cloud-init wait above for why this
         # must never re-run concurrently with that.
@@ -1287,9 +1221,6 @@ def setup_ec2_environment(session, region, cert_bucket=None, dry_run=False):
         result = subprocess.run(cmd)
         if result.returncode != 0:
             print(f"  WARN: remote_deploy.sh exited {result.returncode} for {n['hostname']}")
-
-    if ops_file:
-        os.remove(ops_file)
 
     if repo:
         print(f"\n  Running migrations from {nodes[0]['hostname']} only...")
@@ -1303,7 +1234,7 @@ def setup_ec2_environment(session, region, cert_bucket=None, dry_run=False):
             print(f"  ✓ Migrations applied")
 
 
-# ── Step 10: SES Domain Verification + DKIM ─────────────────────────────────
+# ── Step 8: SES Domain Verification + DKIM ──────────────────────────────────
 def setup_ses(session, region, dry_run=False):
     """Verify domain in SES and enable DKIM signing."""
     ses = session.client("ses")
@@ -1611,14 +1542,6 @@ def show_status(session, region):
     except Exception:
         print(f"  ✗ {PROJECT}-nlb: not found")
 
-    # Cert sync bucket (multi-node only)
-    print("\n── Cert Sync Bucket ──")
-    try:
-        session.client("s3").head_bucket(Bucket=f"{PROJECT}-certs")
-        print(f"  ✓ {PROJECT}-certs")
-    except Exception:
-        print(f"  ✗ {PROJECT}-certs: not found")
-
     print()
 
 
@@ -1635,12 +1558,10 @@ def write_django_conf(region, db_endpoint, cache_endpoint):
     AWS_KEY/AWS_SECRET come from var/deploy.json (see load_credentials()) and
     get copied in here too, since the *deployed app* needs them as real
     settings (S3/SES, etc) even though deploy.py's own boto3 calls don't read
-    them from this file. The cert-plane keys (LOAD_BALANCER_DOMAIN/
-    PRIMARY_BALANCER_HOST/AWS_CERT_BUCKET) go in here too on multi-node
-    deploys: aws/certbot_sync.py and aws/check_setup.py read THIS file
-    (key=value), never var/ops.json — an earlier version of this docstring
-    claimed otherwise, and a fleet provisioned by deploy.py could never arm
-    cert sync at all."""
+    them from this file.
+
+    The block is fleet-shape-independent: certificates are no longer this
+    script's business, so nothing here varies with EC2_COUNT."""
     lines = []
     if os.path.exists(DJANGO_CONF):
         with open(DJANGO_CONF) as f:
@@ -1661,15 +1582,6 @@ def write_django_conf(region, db_endpoint, cache_endpoint):
         f'EMAIL_FROM = "{SES_FROM_EMAIL}"',
         f'GITHUB_WEBHOOK_SECRET = "{GITHUB_WEBHOOK_SECRET}"',
     ]
-    # Multi-node only. A single-node conf carrying AWS_CERT_BUCKET would arm
-    # check_setup.py's cert-bucket audit against a bucket nothing created,
-    # and certbot_sync.py is meant to stay dormant there.
-    if EC2_COUNT > 1:
-        block += [
-            f'LOAD_BALANCER_DOMAIN = "{SES_DOMAIN}"',
-            f'PRIMARY_BALANCER_HOST = "{_node_hostname(1)}"',
-            f'AWS_CERT_BUCKET = "{PROJECT}-certs"',
-        ]
     block.append(DJANGO_CONF_END)
 
     if DJANGO_CONF_BEGIN in lines:
@@ -1689,23 +1601,7 @@ def write_django_conf(region, db_endpoint, cache_endpoint):
         print(f"  NOTE: AWS_KEY/AWS_SECRET are blank — set them in {DEPLOY_JSON} and re-run.")
 
 
-def build_ops_json(cert_bucket=None):
-    """Operator-reference copy of the cert-plane values, pushed as
-    var/ops.json. NOTHING reads this file — aws/certbot_sync.py, check_setup.py
-    and ec2_deploy.sh all read the same keys from var/django.conf, where
-    write_django_conf() now also puts them. Kept only so an operator on the box
-    can see the fleet shape without opening the conf.
-    Returns None for single-node deploys — nothing to sync, no file needed."""
-    if EC2_COUNT <= 1:
-        return None
-    return {
-        "LOAD_BALANCER_DOMAIN": SES_DOMAIN,
-        "PRIMARY_BALANCER_HOST": _node_hostname(1),
-        "AWS_CERT_BUCKET": cert_bucket or f"{PROJECT}-certs",
-    }
-
-
-# ── Step 10: GitHub Actions secret ───────────────────────────────────────────
+# ── Step 9: GitHub Actions secret ────────────────────────────────────────────
 def ensure_github_webhook(dry_run=False):
     """Create the GitHub push webhook that triggers fleet deploys —
     https://{DOMAIN}/api/github/deploy/webhook, content type json, signed
@@ -1778,7 +1674,7 @@ def ensure_github_webhook(dry_run=False):
     print()
 
 
-# ── Step 11: Verify (smoke test the fleet) ───────────────────────────────────
+# ── Step 10: Verify (smoke test the fleet) ───────────────────────────────────
 def verify_deployment(session, region, dry_run=False):
     """SSH into every node and check: nginx up, mojo-asgi up, jobman engine up,
     and DB/Redis connectivity via the app's own `manage.py status` (real
@@ -1856,7 +1752,7 @@ fi
 # Default full run — everything needed to get node1 live. "bake-ami" is
 # deliberately excluded: it's a manual, one-time action you run once node1 is
 # verified, not something a full run should silently redo.
-STEPS = ["sg", "key", "rds", "cache", "ec2", "cert-bucket", "nlb", "ec2-setup", "ses", "github-webhook", "verify"]
+STEPS = ["sg", "key", "rds", "cache", "ec2", "nlb", "ec2-setup", "ses", "github-webhook", "verify"]
 ALL_STEPS = STEPS + ["bake-ami"]
 
 
@@ -1906,7 +1802,6 @@ def main():
     db_endpoint = ""
     cache_endpoint = ""
     nodes = []
-    cert_bucket = None
 
     # Always load existing SG IDs if skipping SG step. sg_ids keys ("node") are
     # our own internal names — the "nodes" AWS SG name itself is plural (see
@@ -1964,13 +1859,8 @@ def main():
             nodes = setup_ec2(session, region, vpc_id, sg_ids["node"], key_name, dry_run=args.dry_run)
             print()
 
-        elif step == "cert-bucket":
-            print("── Step 6: Cert Sync Bucket ──")
-            cert_bucket = setup_cert_bucket(session, dry_run=args.dry_run)
-            print()
-
         elif step == "nlb":
-            print("── Step 7: Network Load Balancer ──")
+            print("── Step 6: Network Load Balancer ──")
             if not nodes:
                 nodes = _find_nodes(session)
             if not nodes:
@@ -1980,27 +1870,27 @@ def main():
             print()
 
         elif step == "bake-ami":
-            print("── Step 8: Bake Golden AMI ──")
+            print("── Bake Golden AMI ──")
             bake_ami(session, region, dry_run=args.dry_run)
             print()
 
         elif step == "ec2-setup":
-            print("── Step 9: EC2 Environment Setup ──")
-            setup_ec2_environment(session, region, cert_bucket=cert_bucket, dry_run=args.dry_run)
+            print("── Step 7: EC2 Environment Setup ──")
+            setup_ec2_environment(session, region, dry_run=args.dry_run)
             print()
 
         elif step == "ses":
-            print("── Step 10: SES Email ──")
+            print("── Step 8: SES Email ──")
             setup_ses(session, region, dry_run=args.dry_run)
             print()
 
         elif step == "github-webhook":
-            print("── Step 11: GitHub Deploy Webhook ──")
+            print("── Step 9: GitHub Deploy Webhook ──")
             ensure_github_webhook(dry_run=args.dry_run)
             print()
 
         elif step == "verify":
-            print("── Step 12: Verify ──")
+            print("── Step 10: Verify ──")
             verify_deployment(session, region, dry_run=args.dry_run)
             print()
 

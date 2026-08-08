@@ -12,10 +12,11 @@ output "ssh_targets" {
 
 output "primary_balancer_host" {
   description = <<-EOT
-    Set PRIMARY_BALANCER_HOST in var/django.conf to exactly this. It must name
-    the node sitting in the certbot-targets group, or the node that receives
-    ACME challenges will behave as a replica and never publish the renewed
-    lineage — certificates then stop renewing silently.
+    The node sitting in the certbot-targets group — where HTTP-01 challenges
+    land. This is NOT a var/django.conf key: nothing reads PRIMARY_BALANCER_HOST
+    any more. Fleet certificates are issued by dnsman over DNS-01 and installed
+    per node by mojo.apps.edge; this output only matters if something on this
+    environment still validates over HTTP-01.
   EOT
   value       = module.nodes.gatekeeper_hostname
 }
@@ -51,6 +52,5 @@ output "django_conf_fragment" {
     REDIS_SSL = True
     AWS_REGION = "${var.region}"
     AWS_CLOUDWATCH_ALARM_TOPIC_ARNS = "${module.observability.alarm_topic_arn}"
-    PRIMARY_BALANCER_HOST = "${module.nodes.gatekeeper_hostname}"
   EOT
 }

@@ -1,6 +1,6 @@
 [Unit]
 Description=Pull application config from S3
-Documentation=file:/opt/api/aws/config_sync.py
+Documentation=https://github.com/NativeMojo/django-mojo/blob/main/docs/django_developer/deploy/README.md
 
 # Needs the network up to reach S3, and must complete BEFORE the app starts so
 # a freshly booted node never starts against a missing or stale django.conf.
@@ -11,7 +11,7 @@ Before=mojo-asgi.service
 [Service]
 Type=oneshot
 RemainAfterExit=no
-ExecStart=/opt/api/aws/config_sync.py
+ExecStart=/usr/bin/python3 -m mojo.deploy.config_sync
 
 # An unconfigured box exits 0 (no AWS_CONFIG_BUCKET), so a non-zero status here
 # is a real failure. It is NOT fatal to boot on purpose: a node holding a good
