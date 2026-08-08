@@ -357,10 +357,10 @@ log "Installing cron jobs..."
 # certbot's venv symlink lives. Consistency and one less crutch: the
 # /usr/bin/certbot symlink above already makes certbot resolvable here.
 #
-# Plain renew, because bootstrap runs BEFORE the repo is cloned and cannot
-# reference /opt/api. aws/ec2_deploy.sh overwrites this cron with the
-# role-aware certbot_sync.py --renew form in the same block that installs the
-# pull cron — so a node that has a synced lineage always has the gated renew.
+# Plain renew, and --quiet, because bootstrap runs BEFORE the repo is cloned
+# and cannot redirect into /opt/api/var/logs. aws/ec2_deploy.sh overwrites
+# this cron with the same renew pointed at var/logs/certbot.log, so a node
+# with a checkout logs its renewals instead of running them silently.
 cat > /etc/cron.d/1_certbot <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

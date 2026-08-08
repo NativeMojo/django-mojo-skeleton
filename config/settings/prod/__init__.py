@@ -32,5 +32,19 @@ MOJO_APP_STATUS_200_ON_ERROR = False
 EDGE_DEPLOY_SCRIPT = ["/opt/api/aws/update.sh"]
 EDGE_DEPLOY_BRANCH = "main"
 # This deployment installs mojo.apps.edge for the DEPLOY plane only — nginx
-# is owned by aws/post_deploy.sh, not the edge vhost-convergence sweep.
+# is owned by aws/post_deploy.sh, not the edge vhost-convergence sweep, for
+# as long as convergence is off.
+#
+# The node-side prerequisites are provisioned anyway (aws/ec2_deploy.sh):
+# /etc/sudoers.d/mojo-edge, the /etc/nginx/conf.d/mojo.conf include, and an
+# ec2-user-owned var/edge. That is deliberate — turning the certificate and
+# vhost plane on is then a settings edit, not a second manual pass over every
+# node. Two consequences worth knowing first: with convergence ON,
+# post_deploy.sh's `nginx -t || die` gates code deploys on the live config
+# including edge generations; and post_deploy.sh does not distribute conf.d,
+# so a node provisioned before this change needs aws/ec2_deploy.sh re-run
+# before it can opt in. See docs/django_developer/deployment/provisioning.md.
 EDGE_CONVERGE_ENABLED = False
+# EDGE_RESERVED_SERVER_NAMES = ["api.example.com"]   # REQUIRED before enabling
+# convergence — it fails closed: with ALLOWED_HOSTS = ["*"] and this unset, no
+# vhost can be enabled at all.
