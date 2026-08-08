@@ -237,7 +237,11 @@ Do not assume anything here is running. As of this writing:
 **Built and tested**
 - Terraform for the whole environment (network, load balancer, nodes, database,
   cache, alarms)
-- `certbot_sync.py` — copies one certificate between machines
+- `certbot_sync.py` — copies one certificate between machines, and (via
+  `--renew`) gates renewal so only the primary runs certbot *(the pull half
+  could never install on Amazon Linux 2023 until this was fixed: it staged
+  downloads in `/tmp`, which is a RAM filesystem there, so the rename into
+  `/etc/letsencrypt` was refused every single time)*
 - `config_sync.py` — pulls `django.conf` from S3 *(the script works; nothing
   installs it yet)*
 
