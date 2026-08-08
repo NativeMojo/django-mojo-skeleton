@@ -57,9 +57,10 @@ resource "aws_instance" "node" {
   # from aws/ec2_bootstrap.sh — provisioning logic does not belong in Terraform,
   # which has no good way to re-run it.
   #
-  # The hostname is not cosmetic: certbot_sync.py compares it against
-  # PRIMARY_BALANCER_HOST to decide whether this node publishes the certificate
-  # lineage or pulls it. A node that boots unnamed does the wrong one.
+  # The hostname is still worth setting: it names the box in logs, metrics and
+  # `tofu output ssh_targets`, and the :80 target group is keyed to it. It is no
+  # longer load-bearing for certificates — nothing compares it against anything
+  # to decide a node's role, because there are no roles.
   #
   # This runs via cloud-init's scripts-user module, which means cloud-init has
   # to actually work in the AMI. It is worth verifying rather than assuming:

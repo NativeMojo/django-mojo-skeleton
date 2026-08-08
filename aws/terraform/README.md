@@ -44,16 +44,17 @@ traffic with no L7 proxy in the path to buffer or time it out.
 challenge over port 80. Behind a balancer that fetch lands on whichever node is
 picked, but certbot wrote the challenge file on only one — so with N nodes in
 the port-80 pool, most validations fail, intermittently and per domain. Pointing
-:80 at one node makes it the sole ACME endpoint; `aws/certbot_sync.py`
-distributes the issued lineage to the rest via S3.
+:80 at one node makes it the sole ACME endpoint for anything still using
+HTTP-01.
 
-> **The one thing that must agree in two places.** `gatekeeper_index` selects
-> which node sits in `certbot-targets`, and `PRIMARY_BALANCER_HOST` in
-> `var/django.conf` tells `certbot_sync.py` which node publishes rather than
-> pulls. If they name different hosts, the node receiving challenges decides it
-> is a replica and never publishes — certificates stop renewing with nothing
-> visibly broken until they expire. `tofu output primary_balancer_host` is the
-> value to copy.
+> **This split is now a fallback, not the plan.** Fleet certificates are issued
+> centrally by dnsman over ACME **DNS-01** — no inbound connectivity, so no
+> gatekeeper — and installed on every node by `mojo.apps.edge`. The :80 target
+> group stays because plain `certbot --nginx` on a single box still validates
+> over HTTP-01, and because an environment mid-migration needs somewhere for
+> challenges to land. Nothing reads `PRIMARY_BALANCER_HOST` any more; the S3
+> certificate bucket and `certbot_sync.py` are gone. See
+> `docs/django_developer/deployment/provisioning.md`.
 
 ## Standing up an environment
 
@@ -89,18 +90,18 @@ Then wire the application:
 tofu output -raw django_conf_fragment   # paste into var/django.conf
 tofu output -raw db_password            # the generated Aurora password
 tofu output point_dns_at                # A records for every hostname
-tofu output primary_balancer_host       # must equal PRIMARY_BALANCER_HOST
+tofu output primary_balancer_host       # which node receives HTTP-01 challenges
 ```
 
 Finally, verify against the reference topology:
 
 ```bash
-./aws/check_setup.py --profile <env>
+python3 -m mojo.deploy.check_setup --profile <env> --config ./var/django.conf
 ```
 
-`check_setup.py` is deliberately independent of Terraform. Terraform checks
-reality against *its own intent*; `check_setup.py` checks reality against the
-topology this README describes. They catch different things — a resource nobody
+The audit ships inside django-mojo and is deliberately independent of
+Terraform. Terraform checks reality against *its own intent*; the audit checks
+reality against the topology this README describes. They catch different things — a resource nobody
 put in Terraform is invisible to `tofu plan` and obvious to the audit.
 
 ## Environments
@@ -145,11 +146,11 @@ For reference, us-east-1 and us-west-2 are priced essentially identically for
 EC2, RDS and ElastiCache, so the region choice here is about isolation rather
 than cost.
 
-Because staging has no balancer, the multi-node `certbot_sync.py` path is never
+Because staging has no balancer, the multi-node certificate path is never
 exercised there. It is worth adding a second staging node for an afternoon once,
-confirming a replica pulls the lineage and serves TLS with it, then destroying
-it. That is the one component that is both new and load-bearing, and it
-otherwise gets its first real run in production.
+confirming that a fresh node installs an edge generation and serves TLS from it,
+then destroying it. That is the one component that is both new and load-bearing,
+and it otherwise gets its first real run in production.
 
 ## Changing capacity
 
@@ -190,16 +191,19 @@ change the old writer. Terraform will not sequence that for you — do the
 failover with `aws rds failover-db-cluster` between applies, or accept one
 restart in a window.
 
-**Adding nodes has a provisioning step Terraform does not cover.** A new instance
-comes up from the AMI with no Let's Encrypt lineage. `certbot_sync.py` pulls it
-from S3 within a minute, but the node fails its HTTPS health check until it does
+**Adding nodes has a provisioning step Terraform does not cover.** A new
+instance comes up from the AMI with no certificates. The edge convergence sweep
+installs a generation within about ten minutes (sooner if something broadcasts
+`install_generation`), but the node fails its HTTPS health check until it does
 and will not take traffic. That is correct behaviour — just don't mistake it for
-a broken deploy in the first minute.
+a broken deploy in the first minutes.
 
 **Scale down carefully.** `node_count` down destroys the highest-indexed
-instances. The `gatekeeper_survives_scale_down` check keeps the ACME endpoint at
-index 0 so a scale-down never destroys it — losing it stops certificate renewal
-while traffic keeps flowing, which looks like nothing at all for 90 days.
+instances. The `gatekeeper_survives_scale_down` check keeps the :80 target at
+index 0 so a scale-down never destroys it. That matters much less than it used
+to — DNS-01 issuance does not touch the node at all — but a box still doing its
+own `certbot --nginx` would stop renewing while traffic kept flowing, which
+looks like nothing at all for 90 days.
 
 ## What is deliberately not here
 
@@ -213,14 +217,15 @@ credential chain, so a role would not be usable — see the django-mojo board it
 on ambient credentials + AssumeRole. Once that lands, add a role here and drop
 `AWS_KEY`/`AWS_SECRET` from `django.conf`.
 
-**Certificates.** Issuance and renewal live entirely on the gatekeeper node with
-certbot, and distribution in `aws/certbot_sync.py`. Adding a tenant domain is
-`certbot --nginx -d <domain>` plus an nginx vhost — deliberately not a
+**Certificates.** Issuance and renewal live in dnsman, and node-side
+installation in `mojo.apps.edge`. Adding a tenant domain is a certificate
+request plus a vhost row, both in the admin portal — deliberately not a
 `tofu apply`, so onboarding never touches infrastructure state.
 
-**Autoscaling.** Nodes are individual instances, not an ASG. They hold a
-certificate lineage and a certbot role, so they are not disposable yet. Revisit
-once certificates leave the boxes.
+**Autoscaling.** Nodes are individual instances, not an ASG. Certificates have
+now left the boxes — every node installs what dnsman issued — so the original
+objection is weaker than it was; what remains is that nothing yet registers or
+drains an instance automatically. Revisit alongside the rollout controller.
 
 ## Gotchas found the hard way
 

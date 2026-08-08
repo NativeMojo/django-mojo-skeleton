@@ -9,7 +9,12 @@
 # picks, but certbot wrote the challenge file on only one of them — so with N
 # nodes in the :80 pool, roughly (N-1)/N of validations fail, non-deterministically
 # and per domain. Pointing :80 at exactly one node makes that node the sole ACME
-# endpoint; certbot_sync.py then distributes the issued lineage to the rest.
+# endpoint.
+#
+# NOTE: fleet certificates no longer come this way. dnsman issues them over
+# DNS-01, which needs no inbound connectivity at all, and mojo.apps.edge
+# installs them on every node. This split remains for single-node
+# `certbot --nginx` and for environments mid-migration.
 #
 # This is deliberately an explicit single-member target group rather than relying
 # on the other nodes failing a port-80 health check. Two reasons: the intent is
@@ -20,8 +25,9 @@
 # version would silently fan challenges out to nodes that cannot answer them.
 #
 # TLS is NOT terminated here. Each node terminates with its own copy of the
-# lineage, which is why certbot_sync.py must move the private key and not just
-# the certificate. Passthrough also means the client source IP survives to the
+# certificate and its private key, which is why every node has to receive both —
+# the edge installer writes them 0600 into the generation it is about to make
+# current. Passthrough also means the client source IP survives to the
 # instance (so nginx logs and the incident ipset see real addresses), and that
 # WebSocket and MCP streaming traffic is carried without an L7 proxy in the path
 # to buffer or time it out.

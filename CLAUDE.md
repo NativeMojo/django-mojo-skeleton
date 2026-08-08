@@ -64,7 +64,7 @@ These load automatically — follow them. Highlights:
 ```bash
 source .venv/bin/activate                              # activate venv
 .venv/bin/python ./bin/manage.py <command>             # Django management
-./bin/run_dev_server                                   # dev server (ASGI/Uvicorn)
+./bin/asgi_local                                       # dev server (ASGI/Uvicorn)
 bin/run_tests -t test_module.filename                  # run tests
 .venv/bin/python ./bin/manage.py sync_schema           # makemigrations + migrate
 .venv/bin/python ./bin/manage.py makemigrations <app>  # after model changes

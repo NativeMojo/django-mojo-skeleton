@@ -33,8 +33,13 @@ sudo certbot --nginx -d yourdomain.com -d www.yourdomain.com
 
 Certbot rewrites the `ssl_certificate`/`ssl_certificate_key` lines to the
 real `/etc/letsencrypt/live/...` paths in place — no manual nginx editing
-needed. **This is the single-node instruction only** — see "Multi-node
-certificates" below before running it on a fleet.
+needed. **This is the single-node instruction only** — see "Fleet
+certificates, via dnsman + edge" below before running it on more than one box.
+
+Renewal is `/etc/cron.d/1_certbot`, daily at 08:30, logging to
+`var/logs/certbot.log`. It is deliberately not `--quiet`: a silent renew cron
+makes a broken certbot look exactly like a healthy one for the forty days it
+takes the certificate to expire, so treat that log as the liveness signal.
 
 Certbot lives in its own virtualenv at `/opt/certbot`, symlinked to
 `/usr/local/bin/certbot` (and `/usr/bin/certbot`). It shares no packages with
@@ -47,93 +52,127 @@ certificate expires. Confirm it after provisioning:
 certbot --version
 ```
 
-One residual: `aws/certbot_sync.py` still runs under the *system* `python3`,
-because it needs `boto3` (which arrives with `django-mojo`). The venv isolates
-certbot from the app, not the sync script — a project pin that breaks `boto3`
-still breaks certificate sync.
+## Fleet certificates, via dnsman + edge
 
-## Multi-node certificates
+On a fleet, no node issues certificates and no node copies them to another
+node. **dnsman** issues and renews them centrally over ACME DNS-01 (the ACME
+account key is held in KMS, never on a box), and **`mojo.apps.edge`** is the
+node-side plane: it asks "what should I be serving?", renders the answer into a
+new generation under `EDGE_ROOT`, validates it against this node's real nginx
+configuration, and swaps a symlink. Nothing is pulled from S3, there is no
+primary and no replica, and a node that was switched off converges on its next
+sweep.
 
-On a fleet, exactly one node — `PRIMARY_BALANCER_HOST`, which is node 1 —
-holds the ACME listener, renews, and publishes the lineage to S3. Every other
-node pulls it. The whole plane is armed by three keys in `var/django.conf`,
-which `aws/deploy.py` writes into its managed block whenever `EC2_COUNT > 1`:
+Design docs live in django-mojo:
+[`edge/README.md`](https://github.com/NativeMojo/django-mojo/blob/main/docs/django_developer/edge/README.md)
+and
+[`dnsman/Certificates.md`](https://github.com/NativeMojo/django-mojo/blob/main/docs/django_developer/dnsman/Certificates.md).
 
-```
-LOAD_BALANCER_DOMAIN = "yourdomain.com"
-PRIMARY_BALANCER_HOST = "yourproject-node1"
-AWS_CERT_BUCKET = "yourproject-certs"
-```
+> **Migrating a fleet that still runs certbot_sync-over-S3: read this first.**
+> Do **not** adopt post-1611 `aws/deploy.py` or `aws/ec2_deploy.sh` into a fleet
+> whose certificates still come from the S3 sync plane. Both have had the cert
+> plane removed: a re-synced `deploy.py` run rewrites `var/django.conf`'s
+> managed block *without* `LOAD_BALANCER_DOMAIN`, `PRIMARY_BALANCER_HOST` and
+> `AWS_CERT_BUCKET`, and the legacy `certbot_sync.py` on those nodes then finds
+> itself unconfigured and returns 0 at DEBUG — the pull goes dormant **silently**
+> and certificates expire weeks later with nothing visibly broken. Install edge
+> on every node, verify `installed.json` fleet-wide, and only then move the
+> tooling over.
 
-`aws/certbot_sync.py` reads them from that file (plain `key = value`), never
-from `var/ops.json` — `ops.json` is an operator-reference copy that nothing
-reads. Absent the keys, sync and primary-gating stay dormant and a node
-behaves exactly like a single-node box.
+### The four node prerequisites
 
-**Scaling out (Phase 3)** — bump `EC2_COUNT` in `var/deploy.json`, then:
+Three of the four are provisioned by `aws/ec2_deploy.sh`, so a node built after
+this change is ready and only needs the settings flipped:
 
-```bash
-python aws/deploy.py               # a BARE full run, not --step ec2/--step nlb
-python aws/deploy.py --step verify
-```
-
-The full run is what actually delivers the fleet: every step is get-or-create,
-so re-running is cheap, and only the full run re-derives the DB/cache
-endpoints (which is what lets it rewrite `var/django.conf`, now fleet-shaped),
-creates the cert bucket, launches the new nodes from `CUSTOM_AMI_ID`,
-registers them with the NLB, and pushes the conf to *every* node. `--step ec2`
-plus `--step nlb` do none of the conf, push, or bucket work, so a fleet scaled
-out that way can never arm cert sync.
-
-**Issuing the fleet certificate** — on the primary only:
-
-```bash
-sudo certbot certonly --webroot -w /var/www/certbot -d yourdomain.com
-```
-
-then point the two `ssl_certificate*` lines in the vhost at
-`/etc/letsencrypt/live/yourdomain.com/`. Do **not** use `--nginx` on a fleet:
-besides rewriting those lines it injects `include
-/etc/letsencrypt/options-ssl-nginx.conf`, and that file exists only where
-certbot ran. The moment the vhost reaches a replica, `nginx -t` fails there
-and the node serves nothing. The shipped vhosts keep their TLS settings
-self-contained for exactly this reason.
-
-**The two crons**, both installed by `aws/ec2_deploy.sh`:
-
-| Cron | Runs | Does |
+| Prerequisite | Provisioned by | Notes |
 |---|---|---|
-| `1_certbot` | daily, 08:30 | `certbot_sync.py --renew` — renews, then pushes |
-| `4_certbot_sync` | every 5 min | `certbot_sync.py` — pulls on replicas, publishes on the primary |
+| `mojo.apps.dnsman` in `apps.json` + its 3 migrations | you, at opt-in | dnsman is not installed by default |
+| `/etc/sudoers.d/mojo-edge` | `ec2_deploy.sh` from `aws/nginx/sudoers.d/mojo-edge` | installed 0440 root:root, after `visudo -cf` passes |
+| `/etc/nginx/conf.d/mojo.conf` | `ec2_deploy.sh`, via the existing `conf.d/` copy | one line: `include /opt/api/var/edge/current/conf.d/*.conf;` |
+| `EDGE_ROOT` (`/opt/api/var/edge`), ec2-user-owned | `ec2_deploy.sh` | the job engine that runs the installer is ec2-user |
 
-`--renew` is role-aware. An unconfigured box renews itself exactly as before.
-On a configured fleet only the primary renews, and it pushes the fresh
-certificate in the same run rather than waiting for the next tick; replicas
-skip, because they hold regular files pulled from S3 rather than certbot's
-symlinks into `archive/`, and certbot renewing against one of those would
-corrupt it. Every invocation logs one line to
-`var/logs/certbot_sync.log` — success included. Treat that log as the
-liveness signal: the old cron ran `--quiet` and said nothing either way, so a
-broken certbot looked exactly like a healthy one for the forty days it took
-the certificate to expire.
+The sudoers file grants exactly two **argument-less absolute-path** commands:
+`/usr/sbin/nginx -t` and `/usr/bin/systemctl reload nginx`.
 
-Two behaviors worth knowing before they surprise you:
+- **Never add a rule for the staged check.** `nginx -t -c <an app-writable
+  path>` makes that file nginx's *main* configuration, where `load_module` is
+  legal and is `dlopen()`ed as the user running the check — that is arbitrary
+  root code, not a config test. The staged check runs unprivileged by design
+  (`EDGE_NGINX_STAGED_TEST_CMD`). The live-config `sudo nginx -t` is not
+  vulnerable to the same trick: `conf.d/*.conf` is included inside `http {}`
+  (`aws/nginx/nginx.conf`), and `load_module` is main-context-only, so an
+  edge-written file carrying one fails `nginx -t` with "directive is not
+  allowed here" and nothing is loaded.
+- **Honesty about what this grant buys today: nothing.** AL2023's cloud-init
+  ships `ec2-user ALL=(ALL) NOPASSWD:ALL` and nothing in this skeleton removes
+  it, so on today's node shape ec2-user is already root-equivalent. The file is
+  the documented narrow interface the installer needs, and it is what survives
+  the day the blanket grant is dropped or the engine runs as a dedicated user.
+  Dropping that blanket grant is a separate security decision, deliberately not
+  made here.
 
-- A node with `AWS_CERT_BUCKET` set but `PRIMARY_BALANCER_HOST` missing
-  **refuses to renew** (exit 1, logged) rather than guessing. That is
-  deliberate: renewing on a node that might be a replica is the corruption
-  this design exists to prevent. The tradeoff is real — a mis-edited conf
-  stops renewal — so fix the conf; there is no fallback renew. The refusal is
-  visible in the heartbeat log, and the sync path already refuses the same
-  state the same way.
-- Dropping `EC2_COUNT` back to `1` and re-running removes the three keys from
-  the managed block, which disarms sync fleet-wide. Correct, but not subtle.
+**The var permission sweep excludes `var/edge`.** Edge generations hold private
+keys at 0600 inside 0700 directories; the sweep's 2775/0664 would hand every
+one of them to the `www` group, which is the account nginx and uvicorn run as.
+Both `find` lines in `ec2_deploy.sh` carry `-path "${PROJ_PATH}/var/edge"
+-prune -o` for that reason (`-not -path "*/edge/*"` does not work — it still
+matches `var/edge` itself). The `chown -R ec2-user:www` needs no exclusion:
+edge files are already ec2-user-owned and at 0600/0700 the group bits grant
+nothing whatever group is named.
 
-**Existing nodes** pick all of this up by re-running `sudo bash
-aws/ec2_deploy.sh` on each one — that is what rewrites the crons. There is no
-cron-convergence plane; the crons are written at provisioning time. A box
-provisioned before the `/opt/certbot` venv existed also needs that block run
-by hand (see the "Certbot, in its own venv" section of `aws/ec2_bootstrap.sh`).
+### The two settings that turn it on
+
+In `config/settings/prod/__init__.py`:
+
+```python
+EDGE_CONVERGE_ENABLED = True
+EDGE_RESERVED_SERVER_NAMES = ["api.example.com"]   # your own hostnames
+```
+
+`EDGE_RESERVED_SERVER_NAMES` **fails closed**. The reserved set is
+`ALLOWED_HOSTS` (concrete entries only) plus this setting; with
+`ALLOWED_HOSTS = ["*"]` and this unset, **no vhost can be enabled at all**.
+Declare it — a deployment that cannot name its own hostname cannot protect it,
+and silently allowing every name is the shadowing attack.
+
+### The operator flow
+
+1. Add the domain in dnsman (and seed its `DnsCredential`).
+2. Add the `_acme-challenge` CNAME once, if the zone is one we do not hold API
+   credentials for. It must stay there forever.
+3. Request the certificate. Wildcards are the norm, so one request covers every
+   subdomain.
+4. Declare the upstream, then create the vhost.
+
+### What happens without touching a node
+
+| Trigger | Effect |
+|---|---|
+| `install_generation` | broadcast to the pool; every node installs immediately |
+| `converge_edge` | a sweep every 10 minutes catches anything that missed the broadcast |
+| `certificate_updated` | fires on renewal; the new material rides the next generation |
+
+### Where to look when it does not
+
+- `EDGE_ROOT/installed.json` — the generation this node believes it is on, and
+  any excluded vhosts.
+- `EDGE_ROOT/current` — the symlink; `ls -l` tells you which generation is live.
+- The incident stream — a tenant whose certificate material was unfetchable is
+  excluded and reported rather than freezing the whole pool.
+
+### Two coupling notes
+
+- **With convergence ON, code deploys are gated on the live nginx config.**
+  `post_deploy.sh` runs `nginx -t || die`, and the live config now includes
+  edge generations. The installer validates before it installs, so only drift
+  between the staged and live environments can bite — but that is the failure
+  mode to look for if a deploy dies at the nginx test.
+- **The prerequisites land at provisioning time only.** `post_deploy.sh` does
+  not distribute `conf.d/`, and there is no cron-convergence plane. A node
+  provisioned before this change needs `sudo bash aws/ec2_deploy.sh` re-run (or
+  the three items installed by hand) before it can opt in. A box provisioned
+  before the `/opt/certbot` venv existed also needs that block run by hand (see
+  the "Certbot, in its own venv" section of `aws/ec2_bootstrap.sh`).
 
 ## Verifying connectivity
 

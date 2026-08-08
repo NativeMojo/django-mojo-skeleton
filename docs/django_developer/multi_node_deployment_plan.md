@@ -6,6 +6,32 @@
 
 ---
 
+> ## Superseded in part — 2026-08-08
+>
+> Two of this document's load-bearing assumptions no longer hold. It is kept for
+> the reasoning and the defect record, not as an implementation guide.
+>
+> - **The certificate plane described in §3.6 is gone.** `certbot_sync.py`,
+>   the S3 certificate bucket, `PRIMARY_BALANCER_HOST` and the whole
+>   primary/replica direction were deleted from the skeleton. Certificates are
+>   now issued centrally by **dnsman** (ACME DNS-01, account key in KMS) and
+>   installed per node by **`mojo.apps.edge`**, which renders a validated,
+>   revertible *generation* and swaps a symlink. §3.8 predicted this; it
+>   happened. The multi-lineage rewrite §3.6 asks for was never built and never
+>   will be.
+> - **`config_sync.py` and `check_setup.py` are no longer skeleton files.**
+>   Both ship inside django-mojo as `mojo.deploy.config_sync` and
+>   `mojo.deploy.check_setup`, alongside `mojo.deploy.jobman` and
+>   `mojo.deploy.node_setup`. The "no installer" defect (§2.1, §8 item 2) is
+>   fixed: `ec2_deploy.sh` calls `node_setup`, which installs and enables both
+>   units. Wherever this document names `aws/config_sync.py` or
+>   `aws/check_setup.py` by path, read the module instead.
+>
+> Current state lives in
+> [`deployment/provisioning.md`](deployment/provisioning.md).
+
+---
+
 ## 0. What changed in v2, and what the review got right
 
 The first draft was reviewed and found not implementation-ready. Every finding
@@ -19,8 +45,8 @@ than reported. Summary of what changed:
 | Certs + `conf.d` ship "as one payload" | Logically, not transactionally. Per-object S3 writes expose mixed state | §3.6 release manifests + atomic pointer switch |
 | Publishing in order is enough coordination | Two overlapping pushes interleave | §3.5 fleet lease + immutable release SHA |
 | Gatekeeper runs migrations | A convention, not a lock — and `post_deploy.sh` hides migration failure with `\|\| true` | §3.7 separate phase, advisory lock, fail hard |
-| `config_sync.py` "built and verified" | The script was verified. **Nothing installs or enables it.** | §2.1 corrected; §8 current-state defects |
-| Gatekeeper failover = one target-group edit | `certbot_sync.py` syncs **one** lineage; wmx has **nine**, plus renewal configs and an ACME account key that are never synced | §3.6 and §4 substantially rewritten |
+| `config_sync.py` "built and verified" | The script was verified. **Nothing installs or enables it.** | §2.1 corrected; §8 current-state defects. *Fixed 2026-08-08: it is `mojo.deploy.config_sync`, installed and enabled by `mojo.deploy.node_setup`.* |
+| Gatekeeper failover = one target-group edit | `certbot_sync.py` syncs **one** lineage; wmx has **nine**, plus renewal configs and an ACME account key that are never synced | §3.6 and §4 substantially rewritten. *Moot 2026-08-08: there is no gatekeeper — dnsman + edge replaced the plane.* |
 | ACM capped at 25 certs — "a hard ceiling" | **Wrong, and we had the correct data.** The quota query run during this work returned `Adjustable: True`. | §6 corrected |
 | Onboarding: vhost → certbot → DNS | Self-contradictory; the next paragraph said DNS must come first | §3.6 reordered, and switched to `certonly --webroot` |
 
@@ -145,7 +171,9 @@ Stated as a correction, because v1 claimed otherwise:
 - **`config_sync.py` has no installer.** `ec2_deploy.sh:83` and
   `post_deploy.sh:35` copy `*.service` only — `config-sync.timer` is never
   copied, and neither unit is ever enabled. The script is verified; its
-  *installation* is not built. Fixed in §8.
+  *installation* is not built. Fixed in §8. **Resolved 2026-08-08:**
+  `ec2_deploy.sh` calls `python3 -m mojo.deploy.node_setup`, which copies
+  `*.service` *and* `*.timer` and enables the timers.
 
 ---
 
@@ -157,8 +185,8 @@ intended release?" rather than "did I receive the message?"
 
 | Payload | Owner | Direction | Mechanism |
 |---|---|---|---|
-| `django.conf` | an operator | S3 → every node | `config_sync.py` (script done, installer missing) |
-| nginx `conf.d` + certs | the gatekeeper | gatekeeper → S3 → other nodes | `certbot_sync.py` — needs multi-lineage rewrite |
+| `django.conf` | an operator | S3 → every node | `mojo.deploy.config_sync`, installed and enabled by `mojo.deploy.node_setup` |
+| nginx `conf.d` + certs | dnsman | central issuance → every node installs a generation | `mojo.apps.edge` (2026-08-08; replaced `certbot_sync.py`) |
 | `/opt/www/<project>` | CI | CI → S3 → every node | `www_sync.py` (new) |
 | API code | a release artifact | S3 → every node | `api_sync.py` (new) + rollout controller |
 
@@ -196,13 +224,14 @@ Keep the last few releases so rollback is repointing a symlink.
 
 ### 3.2 Application config
 
-`config_sync.py` (built) pulls `django.conf` from S3 on a timer and at boot.
+`mojo.deploy.config_sync` (built, and installed by `node_setup`) pulls
+`django.conf` from S3 on a timer and at boot.
 Safety property already implemented: **if the fetch fails, keep the existing
 file** — a node with stale config serves; a node with no config does not start.
 
 Config is small and single-file, so it uses a published `sha256` rather than the
-full release-directory machinery. **Outstanding:** install and enable the units
-(§8), and decide whether a config change should trigger a restart via the §3.5
+full release-directory machinery. **Outstanding:** decide whether a config
+change should trigger a restart via the §3.5
 rollout rather than the current hostname-jitter (it should — jitter spreads
 restarts but does not guarantee non-overlap).
 
@@ -274,12 +303,16 @@ credentials the sync scripts do not.
 
 ### 3.6 nginx vhosts and certificates — bigger than v1 assumed
 
-**This is the section the review changed most.**
+**This is the section the review changed most — and the one 2026-08-08
+deleted.** None of what follows was built. `certbot_sync.py` is gone; dnsman
+issues centrally and `mojo.apps.edge` installs per node, which removes the
+gatekeeper rather than improving it (§3.8 called this). Read on for why the
+gatekeeper design was abandoned, not for what to build.
 
-`certbot_sync.py` handles a **single** lineage named by `LOAD_BALANCER_DOMAIN`
-(`certbot_sync.py:482`). The wmx box currently has **nine** lineages. It also
-never syncs `/etc/letsencrypt/renewal/*.conf` (nine files) or the ACME account
-key under `/etc/letsencrypt/accounts/`.
+`certbot_sync.py` handled a **single** lineage named by `LOAD_BALANCER_DOMAIN`.
+The wmx box currently has **nine** lineages. It also never synced
+`/etc/letsencrypt/renewal/*.conf` (nine files) or the ACME account key under
+`/etc/letsencrypt/accounts/`.
 
 So v1's claim — that the gatekeeper publishes tenant certificates and replicas
 pull them — **is not something the current script can do.** For a multi-tenant
@@ -442,8 +475,8 @@ depend on where in the minute a node happens to arrive.
 
 ## 3.8 dnsman may delete most of §3.6 — investigate before building it
 
-`certbot_sync.py`'s own docstring names dnsman's Certificate model as its
-endgame. On inspection that is not aspirational — **dnsman is built**, and it
+`certbot_sync.py`'s own docstring named dnsman's Certificate model as its
+endgame. On inspection that was not aspirational — **dnsman is built**, and it
 attacks the certificate problem from an angle that removes the gatekeeper rather
 than improving it.
 
@@ -482,10 +515,10 @@ than built.
 
 **What dnsman does not provide:** the node-side installer. The docstring is
 explicit — *"dnsman itself has nothing to install, so the framework handler only
-logs."* Something must still write PEMs to disk, `nginx -t`, and reload. That is
-`certbot_sync.py`'s job, but a much smaller version of it: pull one cert from a
-REST endpoint, install, reload. No S3, no direction, no primary/replica, no
-account key.
+logs."* Something must still write PEMs to disk, `nginx -t`, and reload.
+**Built, 2026-08-08:** that is `mojo.apps.edge` — generations, staged and live
+validation, atomic swap, rollback. No S3, no direction, no primary/replica, no
+account key on a box.
 
 ### The blocking constraint, stated plainly
 
@@ -693,11 +726,11 @@ and reloads. Cheaper than maintaining two nginx configurations.
 ```
 terraform apply
    -> nodes boot, self-signed placeholder serves 443
-   -> config_sync pulls django.conf
+   -> mojo.deploy.config_sync pulls django.conf
    -> migrate                              (dnsman tables exist)
    -> seed the DnsCredential               (the one manual secret)
-   -> manage.py dnsman_bootstrap --domain <apex> --wildcard --install
-        DNS-01: no inbound connectivity needed
+   -> request the apex certificate in dnsman (DNS-01, no inbound needed)
+   -> mojo.apps.edge installs the generation on every node
    -> real certificate on disk, nginx reloaded
    -> admin portal reachable over HTTPS
    -> every subsequent domain is done through the portal
@@ -794,9 +827,11 @@ installation is atomic; two-node staging as a release gate.
 **Built and verified:**
 - `aws/terraform/` — VPC, NLB with both target groups, nodes, encrypted Aurora,
   Valkey, alarms. Plans clean; capacity presets.
-- `aws/certbot_sync.py` — distributes **one** lineage with pair verification and
-  an `nginx -t` gate. Correct for what it does; insufficient for §3.6.
-- `aws/config_sync.py` — script verified end-to-end against a live bucket.
+- `mojo.apps.edge` — the node-side certificate and vhost plane (2026-08-08).
+  Replaced `aws/certbot_sync.py`, which distributed **one** lineage and was
+  never going to cover nine.
+- `mojo.deploy.config_sync` — verified end-to-end against a live bucket, and
+  installed + enabled by `mojo.deploy.node_setup`.
 
 **Defects in the existing deploy path, all verified:**
 
@@ -819,15 +854,16 @@ installation is atomic; two-node staging as a release gate.
    per box, which means a node built from an AMI without it silently skips
    migrations forever, and two boxes that both have it both migrate
    concurrently. Replace the flag with the advisory lock in §3.7.
-2. **`config-sync.timer` is never installed** — `ec2_deploy.sh:83` and
-   `post_deploy.sh:35` copy `*.service` only, and neither unit is enabled.
-3. **`certbot_sync.py` covers one of nine lineages**, and no renewal configs or
-   account key. §3.6.
+2. ~~**`config-sync.timer` is never installed**~~ — fixed 2026-08-08:
+   `mojo.deploy.node_setup` copies `*.timer` too and enables the timers.
+3. ~~**`certbot_sync.py` covers one of nine lineages**~~ — moot 2026-08-08:
+   the script is deleted and the plane is dnsman + edge.
 4. **`post_deploy.sh:39` restarts `mojo-asgi` while the node is registered.**
    §3.5.
 
 **Proposed, not built:** `api_sync.py`, `www_sync.py`, the rollout controller,
-multi-lineage `certbot_sync`, Terraform role markers, deploy events → incidents.
+Terraform role markers, deploy events → incidents. (Multi-lineage
+`certbot_sync` was proposed here and then abandoned — see the banner.)
 
 Item 1 is worth fixing independently of everything else here — it applies to the
 single-node deployment running today.

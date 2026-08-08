@@ -120,11 +120,14 @@ stay there forever** — if it is deleted, certificates stop renewing about two
 months later and the site goes down with an expired-certificate warning.
 
 **Step 3 — add it in the admin portal.** DNS → Certificates → request. The
-certificate is issued, stored in the database, and every node picks it up.
+certificate is issued (dnsman, DNS-01, with the ACME account key held in KMS),
+stored in the database, and every node picks it up: `mojo.apps.edge` renders a
+vhost and the certificate material into a new *generation* under
+`/opt/api/var/edge`, validates it against the node's real nginx config, and
+swaps a symlink. A node that was switched off converges on its next sweep.
 
-**[PLANNED]** Steps 2 and 3 depend on dnsman's CNAME delegation, which is being
-built. Until then certificates are issued by certbot on one designated machine —
-see §8.
+Step 2's CNAME is only needed for a domain whose DNS we do not hold API
+credentials for. For a zone dnsman already controls, step 3 is the whole job.
 
 ### Why one CNAME covers many subdomains
 
@@ -134,22 +137,29 @@ you add later — with no further DNS changes.
 
 ---
 
-## 4. Getting the first certificate on a brand-new environment **[PLANNED]**
+## 4. Getting the first certificate on a brand-new environment
 
 A new environment has no certificate, and the admin portal needs one. This is not
 a deadlock, because of *how* we prove domain ownership: we do it through DNS, not
 by having someone connect to the server. Nothing needs to reach the box.
 
+The machine image ships a self-signed placeholder certificate so nginx starts and
+serves *something* before this runs. A browser warning at that stage is expected —
+work through it, or go through the API.
+
+The short path on a brand-new box is plain certbot, and it is fine to use it:
+
 ```bash
-# on the node, once
-manage.py dnsman_bootstrap --domain <your-domain> --wildcard --install
+sudo certbot --nginx -d <your-domain>
 ```
 
-That issues the certificate, writes it to disk, and reloads nginx. The portal is
-then reachable and everything else is done through it.
-
-The machine image ships a self-signed placeholder certificate so nginx starts and
-serves *something* before this runs. A browser warning at that stage is expected.
+The fleet path, once the portal is reachable, is the one to keep: seed the
+`DnsCredential` for the zone, add the domain in DNS → Certificates, request the
+certificate, then declare the upstream and the vhost. `EDGE_CONVERGE_ENABLED`
+must be `True` and `EDGE_RESERVED_SERVER_NAMES` must name the platform's own
+hostnames — it fails closed, and an unset value means no vhost can be enabled at
+all. Full procedure and prerequisites:
+[`docs/django_developer/deployment/provisioning.md`](../docs/django_developer/deployment/provisioning.md).
 
 ---
 
@@ -162,8 +172,8 @@ Four things get deployed, and they are independent:
 | What | How it gets there |
 |---|---|
 | Application config (`django.conf`) | published to S3; each node pulls it |
-| Website builds | CI uploads to S3; each node pulls |
-| Certificates and nginx vhosts | issued centrally; each node pulls |
+| Website builds | CI uploads to S3; each node pulls **[PLANNED]** |
+| Certificates and nginx vhosts | issued by dnsman; each node installs a generation |
 | API code | a release is published; nodes are updated one at a time |
 
 **The rule underneath all four:** each node checks for updates on a timer, so a
@@ -234,20 +244,28 @@ itself worth fixing.
 
 Do not assume anything here is running. As of this writing:
 
+**How things propagate — the rule under all of it**
+
+*Logic rides pip; this repo carries launchers and config; certificates ride
+dnsman + edge.* Nothing in `aws/` or `bin/` is a copy of framework code any
+more. `mojo.deploy.config_sync`, `check_setup`, `jobman` and `node_setup` ship
+inside django-mojo, which every node reinstalls on every deploy, so a fix
+reaches this environment without anybody re-copying a script into it. That is
+the whole reason the old copies were deleted: the skeleton is a template you
+clone once, and a fix made in one clone never reaches the others.
+
 **Built and tested**
 - Terraform for the whole environment (network, load balancer, nodes, database,
   cache, alarms)
-- `certbot_sync.py` — copies one certificate between machines, and (via
-  `--renew`) gates renewal so only the primary runs certbot *(the pull half
-  could never install on Amazon Linux 2023 until this was fixed: it staged
-  downloads in `/tmp`, which is a RAM filesystem there, so the rename into
-  `/etc/letsencrypt` was refused every single time)*
-- `config_sync.py` — pulls `django.conf` from S3 *(the script works; nothing
-  installs it yet)*
+- dnsman certificate issuance and renewal (DNS-01, ACME account key in KMS)
+- the `mojo.apps.edge` node-side plane — renders vhosts and certificate
+  material into a generation, validates against the node's real nginx config,
+  swaps atomically, and can roll back
+- config pull from S3, installed as a systemd oneshot + timer
 
 **Not built**
-- Website and API code sync, the rolling deploy, dnsman certificates, the
-  first-certificate bootstrap, CloudTrail, the certificate-expiry alarm
+- Website and API code sync, the rolling deploy, CloudTrail, the
+  certificate-expiry alarm
 
 **Known problems in the current single-machine setup**
 - The deploy script ignores failures — a failed migration or dependency install
@@ -264,10 +282,19 @@ Do not assume anything here is running. As of this writing:
 |---|---|
 | `aws/terraform/` | the whole environment as code |
 | `aws/terraform/envs/` | one file per environment |
-| `aws/*.sh`, `aws/*.py` | scripts that run on the machines |
-| `aws/nginx/` | web server config |
-| `aws/check_setup.py` | audits a live AWS account against this design |
+| `aws/*.sh`, `aws/deploy.py` | scripts that provision and update the machines |
+| `aws/nginx/` | web server config, the systemd units, the edge sudoers rule |
+| `python3 -m mojo.deploy.check_setup` | audits a live AWS account against this design |
 | `docs/django_developer/multi_node_deployment_plan.md` | why it is built this way |
 
-Start with `./aws/check_setup.py` if you have inherited an environment and do not
-know what state it is in. It is read-only and will not change anything.
+Start with the audit if you have inherited an environment and do not know what
+state it is in. It is read-only and will not change anything:
+
+```bash
+python3 -m mojo.deploy.check_setup --config ./var/django.conf
+```
+
+It ships inside django-mojo now, so it runs from anywhere the package is
+installed — including a laptop. **Pass `--config` from a laptop.** The packaged
+default is the node path `/opt/api/var/django.conf`, where the old repo-local
+copy defaulted to a path relative to the checkout.

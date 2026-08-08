@@ -81,12 +81,12 @@ AWS, and other environment credentials remain operator-supplied in every deploym
 | `manage.py` | Django management + `sync_schema`, `routes` |
 | `run_tests` | testit test runner (auto-activates venv) |
 | `cron.py` | Cron daemon (`--run`, `--list`, `--daemon`) |
-| `jobman` | Async job engine + scheduler manager |
+| `jobman` | Async job engine + scheduler manager (launcher for `mojo.deploy.jobman`) |
 | `jobs.py` | Job queue CLI |
-| `tasks.py` | Task runner |
 | `versioning` | Semantic version bumping |
 | `setup_local_postgres` | Local DB bootstrap |
-| `_asgi.py` / `_wsgi.py` | ASGI/WSGI entry points |
+| `asgi_local` | Dev server (ASGI/Uvicorn, full realtime stack) |
+| `_asgi.py` | ASGI entry point |
 
 ### `config/settings/` — Profile-based settings
 | Profile | Path | Usage |
