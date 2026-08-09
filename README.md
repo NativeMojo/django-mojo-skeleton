@@ -2,6 +2,11 @@
 
 Project skeleton for building applications with [django-mojo](https://github.com/NativeMojo/django-mojo).
 
+Static WebApp repositories can copy the standard
+[`examples/github/workflows/deploy-webapp.yml`](examples/github/workflows/deploy-webapp.yml)
+for merge-to-deploy through django-mojo edge vhosts. See the
+[`MOJO_DEPLOY_KEY` setup guide](docs/django_developer/deployment/webapps.md).
+
 ## Quick Start
 
 ### 1. Create your project
