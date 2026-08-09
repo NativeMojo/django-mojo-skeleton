@@ -1215,7 +1215,7 @@ def setup_ec2_environment(session, region, dry_run=False):
         # --skip-bootstrap: setup_ec2()'s user_data already handled it (or it's
         # baked into a golden AMI) — see the cloud-init wait above for why this
         # must never re-run concurrently with that.
-        cmd = ["bash", remote_deploy_sh, ip, "--key", pem_file, "--skip-ossec", "--skip-bootstrap"]
+        cmd = ["bash", remote_deploy_sh, ip, "--key", pem_file, "--skip-bootstrap"]
         if repo:
             cmd += ["--repo", repo]
         result = subprocess.run(cmd)

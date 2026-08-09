@@ -11,7 +11,10 @@
 #                          auto-update /opt/api. The `deploy` user's key is
 #                          separate and scoped to static sites under WEB_ROOT
 #                          — not touched by this script)
-#   3. mojo-ossec install (rsyncs a local mojo-ossec checkout and installs it)
+#
+# Host security monitoring is NOT installed here: mojo-ossec is retired, and
+# its replacement (MojoSec, NativeMojo #1625) ships as a framework-owned
+# systemd service through the deploy plane — it self-installs on deploy.
 #
 # Usage:
 #   aws/remote_deploy.sh <hostname> [options]
@@ -24,9 +27,6 @@
 #                       clones git@github.com:<owner/repo>.git to PROJ_PATH
 #                       and runs its aws/ec2_deploy.sh. Omit to stop after
 #                       bootstrap and do the app deploy yourself.
-#   --ossec <path>      Local mojo-ossec checkout to install (default:
-#                       ../mojo-ossec next to this repo)
-#   --skip-ossec        Don't install mojo-ossec
 #   --skip-bootstrap    Skip ec2_bootstrap.sh (host already bootstrapped)
 #
 # Bootstrap env passthrough (see ec2_bootstrap.sh for details):
@@ -48,11 +48,9 @@ HOST=""
 SSH_USER="ec2-user"
 SSH_KEY=""
 REPO=""
-OSSEC_PATH="$(cd "${SCRIPT_DIR}/../../mojo-ossec" 2>/dev/null && pwd || true)"
-SKIP_OSSEC="n"
 SKIP_BOOTSTRAP="n"
 
-usage() { sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 1; }
+usage() { sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 1; }
 
 [[ $# -eq 0 ]] && usage
 HOST="$1"; shift
@@ -62,8 +60,6 @@ while [[ $# -gt 0 ]]; do
         --key) SSH_KEY="$2"; shift 2 ;;
         --user) SSH_USER="$2"; shift 2 ;;
         --repo) REPO="$2"; shift 2 ;;
-        --ossec) OSSEC_PATH="$2"; shift 2 ;;
-        --skip-ossec) SKIP_OSSEC="y"; shift ;;
         --skip-bootstrap) SKIP_BOOTSTRAP="y"; shift ;;
         -h|--help) usage ;;
         *) die "Unknown option: $1" ;;
@@ -183,17 +179,6 @@ REMOTE
     fi
     ssh_run "sudo bash -c 'chown -R ec2-user:www \"${PROJ_PATH}\" && PROJ_PATH=\"${PROJ_PATH}\" bash \"${PROJ_PATH}/aws/ec2_deploy.sh\"'"
     log "App deploy complete."
-fi
-
-# ── 3. mojo-ossec ─────────────────────────────────────────────────────────────
-if [[ "$SKIP_OSSEC" == "y" ]]; then
-    log "Skipping mojo-ossec (--skip-ossec)."
-elif [[ -z "$OSSEC_PATH" || ! -x "${OSSEC_PATH}/install_ec2.sh" ]]; then
-    log "WARN: mojo-ossec checkout not found (looked in: ${OSSEC_PATH:-<none>}). Pass --ossec <path> or --skip-ossec."
-else
-    log "Installing mojo-ossec on $HOST via ${OSSEC_PATH}/install_ec2.sh..."
-    ( cd "$OSSEC_PATH" && ./install_ec2.sh "$HOST" )
-    log "mojo-ossec install complete."
 fi
 
 log ""
