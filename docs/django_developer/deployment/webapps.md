@@ -72,18 +72,17 @@ SHA for different bytes is rejected. If any active runner fails, the platform
 restores the previous release and the action fails with bounded runner
 diagnostics. A later deployment is never overwritten by an older rollback.
 
+There is no separate promotion approval, manual hold, or admin deployment
+button. The protected GitHub branch is the human control plane. To roll back
+intentionally, rerun the workflow for the older commit; its immutable artifact
+is reused and converged through the same path.
+
 ## Rotation and recovery
 
 `link_key` is a hard cutover: the prior credential stops working as soon as the
 new one is minted. Capture the new token and immediately replace the GitHub
 secret. A run caught in that short interval fails safely and can be rerun.
 Revoking or rotating a key does not change the release already being served.
-
-Automatic deployment is the WebApp default. Setting `auto_promote=False` is an
-explicit manual hold; the action verifies the upload but then fails because it
-cannot honestly call the release deployed. An administrator can promote or
-roll back with `POST /api/edge/webapp/promote`, which uses the same fleet
-coordinator.
 
 ## Monorepos and environments
 

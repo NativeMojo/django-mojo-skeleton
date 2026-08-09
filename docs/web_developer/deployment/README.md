@@ -11,4 +11,8 @@ The Git commit SHA is the immutable release version. The workflow succeeds only
 after the active edge fleet reports the release live; a failed convergence
 rolls back and fails the workflow.
 
+GitHub is the only deployment control plane. There is no separate human
+promotion step or manual hold. Rerun the workflow for an older commit to roll
+back intentionally.
+
 Administrators can follow the complete [setup and rotation runbook](../../django_developer/deployment/webapps.md).
