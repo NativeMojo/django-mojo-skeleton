@@ -1,7 +1,7 @@
-# CI/CD
+# Backend CI/CD
 
-**CI does not deploy, and there is no deploy workflow.** A push to `main`
-deploys itself: GitHub delivers the push event to
+The Django backend does not use a deploy workflow. A push to `main` deploys
+itself: GitHub delivers the push event to
 `/api/github/deploy/webhook` (HMAC-signed with `GITHUB_WEBHOOK_SECRET`), and
 the fleet runs a canary deploy of exactly the pushed commit — see
 [Updating Code](updating.md). The old `.github/workflows/deploy.yml`, its
@@ -44,3 +44,17 @@ select. The SSH deploy key that lets EC2 nodes clone the repo has the same
 same kind of copy-pasteable fallback.
 
 Every push to `main` — direct or merged — triggers a canary fleet deploy.
+
+## Static WebApps are different
+
+Static WebApps hosted by an edge vhost use GitHub Actions because they publish
+built artifacts, not a backend Git checkout. Their repository builds the app
+and invokes django-mojo's canonical WebApp action with the WebApp-scoped secret
+`MOJO_DEPLOY_KEY`. See [WebApp deployment with GitHub Actions](webapps.md).
+
+These paths do not overlap:
+
+| Repository type | Deploy trigger | Credential | Result |
+|---|---|---|---|
+| Django backend/API | GitHub push webhook | `GITHUB_WEBHOOK_SECRET` | Canary checkout and backend fleet update |
+| Static WebApp | GitHub Actions workflow | `MOJO_DEPLOY_KEY` | Verified immutable artifact and edge-vhost convergence |
