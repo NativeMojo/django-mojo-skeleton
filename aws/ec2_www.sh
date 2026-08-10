@@ -325,7 +325,7 @@ chown www:www /var/www/certbot
 # flags such as AWS CLI's `-s`.
 log "Pinning OS python3 scripts to python3.9 before remapping /usr/bin/python3..."
 while IFS= read -r -d '' f; do
-    sed -i '1s|^#![[:space:]]*/usr/bin/python3\([[:space:]].*\)\?$|#!/usr/bin/python3.9\1|' "$f"
+    sed -i -E '1s|^#![[:space:]]*/usr/bin/python3([[:space:]].*)?$|#!/usr/bin/python3.9\1|' "$f"
     log "  pinned shebang: $f"
 done < <(grep -rlZ --binary-files=without-match -E '^#![[:space:]]*/usr/bin/python3([[:space:]]|$)' /usr/bin /usr/sbin /usr/libexec 2>/dev/null)
 

@@ -59,9 +59,14 @@ for f in "$BOOTSTRAP" "$WWW"; do
     n="$(basename "$f")"
     assert_fixed "$f" "grep -rlZ --binary-files=without-match -E '^#![[:space:]]*/usr/bin/python3([[:space:]]|$)'" \
         "$n finds shebangs with whitespace and interpreter arguments"
-    assert_fixed "$f" "sed -i '1s|^#![[:space:]]*/usr/bin/python3\\([[:space:]].*\\)\\?$|#!/usr/bin/python3.9\\1|'" \
+    assert_fixed "$f" "sed -i -E '1s|^#![[:space:]]*/usr/bin/python3([[:space:]].*)?$|#!/usr/bin/python3.9\\1|'" \
         "$n preserves interpreter arguments while pinning Python 3.9"
 done
+pin_expr='1s|^#![[:space:]]*/usr/bin/python3([[:space:]].*)?$|#!/usr/bin/python3.9\1|'
+assert_eq "$(printf '#! /usr/bin/python3 -s\n' | sed -E "$pin_expr")" \
+    "#!/usr/bin/python3.9 -s" "the AWS CLI shebang is pinned and keeps -s"
+assert_eq "$(printf '#!/usr/bin/python3\n' | sed -E "$pin_expr")" \
+    "#!/usr/bin/python3.9" "the bare distro shebang is still pinned"
 
 # Every file #1611 deleted: three logic copies whose packaged replacements ship
 # in django-mojo, and seven orphans nothing referenced.
