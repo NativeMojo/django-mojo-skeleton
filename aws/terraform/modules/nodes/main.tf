@@ -29,6 +29,68 @@ locals {
   hostnames = [for i in range(var.node_count) : "${var.project}${i + 1}"]
 }
 
+# The node is also the django-mojo administration plane during environment
+# setup. It buys domains, provisions fleet resources, configures storage and
+# email, and installs CloudWatch/SNS plus GuardDuty/EventBridge. Keep that
+# setup credential attached until the environment is fully converged; a later
+# hardening pass can replace this inline policy with the runtime subset without
+# rebuilding the instances.
+resource "aws_iam_role" "node" {
+  name = "${local.name}-node"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "node_setup" {
+  name = "django-mojo-setup"
+  role = aws_iam_role.node.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "DjangoMojoEnvironmentSetup"
+      Effect = "Allow"
+      Action = [
+        "route53domains:*",
+        "route53:*",
+        "s3:*",
+        "ec2:*",
+        "elasticloadbalancing:*",
+        "autoscaling:*",
+        "rds:*",
+        "elasticache:*",
+        "acm:*",
+        "iam:*",
+        "sts:AssumeRole",
+        "kms:*",
+        "cloudwatch:*",
+        "logs:*",
+        "cloudtrail:*",
+        "ce:GetCostAndUsage",
+        "sns:*",
+        "ses:*",
+        "guardduty:*",
+        "events:*",
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
+resource "aws_iam_instance_profile" "node" {
+  name = "${local.name}-node"
+  role = aws_iam_role.node.name
+}
+
 resource "aws_instance" "node" {
   count = var.node_count
 
@@ -37,10 +99,10 @@ resource "aws_instance" "node" {
   key_name               = var.ssh_key_name
   subnet_id              = var.public_subnet_ids[count.index % length(var.public_subnet_ids)]
   vpc_security_group_ids = [var.node_sg_id]
+  iam_instance_profile   = aws_iam_instance_profile.node.name
 
-  # IMDSv2 required. With no instance profile attached there are no credentials
-  # in the metadata service to steal, but this also costs nothing and means
-  # attaching a profile later does not quietly open an SSRF-to-credentials path.
+  # IMDSv2 is mandatory because the node receives its AWS credential through
+  # the instance profile above.
   metadata_options {
     http_endpoint = "enabled"
     http_tokens   = "required"

@@ -84,6 +84,15 @@ tofu plan  -var-file=envs/<project>.prod.tfvars
 tofu apply -var-file=envs/<project>.prod.tfvars
 ```
 
+Every application node receives the `${project}-${env}-node` instance profile.
+Its `django-mojo-setup` policy intentionally covers the AWS services used while
+building an environment: domains and DNS, EC2/NLB/RDS/ElastiCache, S3, SES,
+IAM/KMS, CloudWatch/Logs/CloudTrail/SNS, and GuardDuty/EventBridge. That is the
+node's setup credential—do not add static `AWS_KEY`/`AWS_SECRET` values to
+`django.conf`. Once the environment and admin portal can reproduce the complete
+setup, the inline policy can be replaced in place with a runtime-only policy;
+the instances do not need to be rebuilt.
+
 Then wire the application:
 
 ```bash

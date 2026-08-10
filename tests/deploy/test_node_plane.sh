@@ -49,6 +49,7 @@ TIMER="$REPO/aws/nginx/systemd/config-sync.timer"
 APP_CONF="$REPO/aws/nginx/conf.d/app.conf"
 MOJO_CONF="$REPO/aws/nginx/conf.d/mojo.conf"
 PROD_SETTINGS="$REPO/config/settings/prod/__init__.py"
+TF_NODES="$REPO/aws/terraform/modules/nodes/main.tf"
 
 # Remapping /usr/bin/python3 to the application interpreter must not break
 # distro tools. AWS CLI's AL2023 launcher includes both whitespace after #!
@@ -67,6 +68,18 @@ assert_eq "$(printf '#! /usr/bin/python3 -s\n' | sed -E "$pin_expr")" \
     "#!/usr/bin/python3.9 -s" "the AWS CLI shebang is pinned and keeps -s"
 assert_eq "$(printf '#!/usr/bin/python3\n' | sed -E "$pin_expr")" \
     "#!/usr/bin/python3.9" "the bare distro shebang is still pinned"
+
+echo "terraform nodes: every instance receives the standard AWS setup role"
+assert_has "$TF_NODES" '^resource "aws_iam_role" "node"' \
+    "the node role is managed with the fleet"
+assert_has "$TF_NODES" '^resource "aws_iam_role_policy" "node_setup"' \
+    "the setup permissions are managed with the fleet"
+assert_has "$TF_NODES" 'iam_instance_profile.*aws_iam_instance_profile.node.name' \
+    "every EC2 node receives the instance profile"
+for service in route53domains s3 ec2 rds elasticache iam cloudwatch sns ses guardduty events; do
+    assert_has "$TF_NODES" "\"${service}:\\*\"" \
+        "the setup role includes ${service} provisioning"
+done
 
 # Every file #1611 deleted: three logic copies whose packaged replacements ship
 # in django-mojo, and seven orphans nothing referenced.
