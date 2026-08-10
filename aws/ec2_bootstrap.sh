@@ -331,19 +331,21 @@ chown www:www /var/www/certbot
 
 # ── Python setup (AFTER all dnf operations) ───────────────────────────────────
 #
-# AL2023 system tools (dnf, and potentially others) shebang on the bare
-# "#!/usr/bin/python3" and depend on that resolving to the real system Python
+# AL2023 system tools (dnf, AWS CLI, and potentially others) shebang on
+# /usr/bin/python3, sometimes with whitespace after #! and interpreter flags,
+# and depend on that resolving to the real system Python
 # 3.9, which has their C-extension bindings (e.g. dnf's own module) installed
 # for it specifically — those bindings aren't available for any other
 # interpreter and aren't pip-installable. Before remapping /usr/bin/python3 to
 # ${PYTHON_VER} below (which our own project scripts rely on), pin every
-# OS-provided script with that exact shebang to python3.9 explicitly, so they
-# keep working regardless of what /usr/bin/python3 points to afterward.
+# OS-provided script with that interpreter to python3.9 explicitly, preserving
+# flags such as AWS CLI's `-s`, so they keep working regardless of what
+# /usr/bin/python3 points to afterward.
 log "Pinning OS python3 scripts to python3.9 before remapping /usr/bin/python3..."
 while IFS= read -r -d '' f; do
-    sed -i '1s|^#!/usr/bin/python3$|#!/usr/bin/python3.9|' "$f"
+    sed -i '1s|^#![[:space:]]*/usr/bin/python3\([[:space:]].*\)\?$|#!/usr/bin/python3.9\1|' "$f"
     log "  pinned shebang: $f"
-done < <(grep -rlZ --binary-files=without-match '^#!/usr/bin/python3$' /usr/bin /usr/sbin /usr/libexec 2>/dev/null)
+done < <(grep -rlZ --binary-files=without-match -E '^#![[:space:]]*/usr/bin/python3([[:space:]]|$)' /usr/bin /usr/sbin /usr/libexec 2>/dev/null)
 
 log "Configuring Python ${PYTHON_VER}..."
 alternatives --install /usr/bin/python3 python3 "/usr/bin/python${PYTHON_VER}" 20

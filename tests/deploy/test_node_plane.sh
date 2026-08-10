@@ -32,6 +32,9 @@ assert_eq() { # actual expected label
 assert_has() { # file pattern label
     if grep -q -- "$2" "$1" 2>/dev/null; then ok "$3"; else fail "$3 (no '$2' in $(basename "$1"))"; fi
 }
+assert_fixed() { # file literal label
+    if grep -qF -- "$2" "$1" 2>/dev/null; then ok "$3"; else fail "$3 (no literal '$2' in $(basename "$1"))"; fi
+}
 assert_lacks() { # file pattern label
     if grep -q -- "$2" "$1" 2>/dev/null; then fail "$3 ('$2' present in $(basename "$1"))"; else ok "$3"; fi
 }
@@ -46,6 +49,19 @@ TIMER="$REPO/aws/nginx/systemd/config-sync.timer"
 APP_CONF="$REPO/aws/nginx/conf.d/app.conf"
 MOJO_CONF="$REPO/aws/nginx/conf.d/mojo.conf"
 PROD_SETTINGS="$REPO/config/settings/prod/__init__.py"
+
+# Remapping /usr/bin/python3 to the application interpreter must not break
+# distro tools. AWS CLI's AL2023 launcher includes both whitespace after #!
+# and the -s interpreter flag, so an exact '#!/usr/bin/python3' matcher misses
+# it even though it depends on the distro's Python 3.9 awscli package.
+echo "bootstraps: every distro-python shebang form is pinned before remapping"
+for f in "$BOOTSTRAP" "$WWW"; do
+    n="$(basename "$f")"
+    assert_fixed "$f" "grep -rlZ --binary-files=without-match -E '^#![[:space:]]*/usr/bin/python3([[:space:]]|$)'" \
+        "$n finds shebangs with whitespace and interpreter arguments"
+    assert_fixed "$f" "sed -i '1s|^#![[:space:]]*/usr/bin/python3\\([[:space:]].*\\)\\?$|#!/usr/bin/python3.9\\1|'" \
+        "$n preserves interpreter arguments while pinning Python 3.9"
+done
 
 # Every file #1611 deleted: three logic copies whose packaged replacements ship
 # in django-mojo, and seven orphans nothing referenced.

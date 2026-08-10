@@ -317,6 +317,18 @@ mkdir -p /var/www/certbot
 chown www:www /var/www/certbot
 
 # ── Python setup (AFTER all dnf operations) ───────────────────────────────────
+#
+# AL2023 system tools (dnf, AWS CLI, and potentially others) shebang on
+# /usr/bin/python3, sometimes with whitespace after #! and interpreter flags,
+# and depend on that resolving to the real system Python 3.9. Pin those scripts
+# before remapping /usr/bin/python3 to the application interpreter, preserving
+# flags such as AWS CLI's `-s`.
+log "Pinning OS python3 scripts to python3.9 before remapping /usr/bin/python3..."
+while IFS= read -r -d '' f; do
+    sed -i '1s|^#![[:space:]]*/usr/bin/python3\([[:space:]].*\)\?$|#!/usr/bin/python3.9\1|' "$f"
+    log "  pinned shebang: $f"
+done < <(grep -rlZ --binary-files=without-match -E '^#![[:space:]]*/usr/bin/python3([[:space:]]|$)' /usr/bin /usr/sbin /usr/libexec 2>/dev/null)
+
 log "Configuring Python ${PYTHON_VER}..."
 alternatives --install /usr/bin/python3 python3 "/usr/bin/python${PYTHON_VER}" 20
 alternatives --install /usr/bin/python  python  "/usr/bin/python${PYTHON_VER}" 20
