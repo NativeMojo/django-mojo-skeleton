@@ -18,6 +18,11 @@ configuration, generated secrets, or application-specific state. For
 Codex-authored commits use
 `Co-Authored-By: OpenAI Codex <noreply@openai.com>`.
 
+Application repositories test only their own suites. A full application test
+run must use `bin/run_tests --nomojo`; never run django-mojo's framework suites
+from a consumer project. Only the django-mojo repository runs the framework's
+bare `bin/run_tests` suite.
+
 ## Skill Synchronization
 
 The upstream-managed dev skill pack lives under `.claude/skills/`. ChatGPT and

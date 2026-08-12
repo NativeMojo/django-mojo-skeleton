@@ -24,6 +24,9 @@ Before writing any test, read `docs/django_developer/testit/Overview.md`. This i
 - Never write tests that assert the feature is absent or broken
 - Setup functions must clean up test data before creating it
 - Run with `bin/run_tests -t test_module.filename` — do not ask the user to run them
+- This is a django-mojo consumer project: run its full application suite with
+  `bin/run_tests --nomojo`. Never run django-mojo's framework suites here; the
+  django-mojo repository already owns and validates them.
 - If a test fails, fix the **code** (not the test) unless the test itself is wrong
 
 ## Test Location

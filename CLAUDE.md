@@ -65,7 +65,8 @@ These load automatically — follow them. Highlights:
 source .venv/bin/activate                              # activate venv
 .venv/bin/python ./bin/manage.py <command>             # Django management
 ./bin/asgi_local                                       # dev server (ASGI/Uvicorn)
-bin/run_tests -t test_module.filename                  # run tests
+bin/run_tests -t test_module.filename                  # run one app test module
+bin/run_tests --nomojo                                 # full app suite; never framework tests
 .venv/bin/python ./bin/manage.py sync_schema           # makemigrations + migrate
 .venv/bin/python ./bin/manage.py makemigrations <app>  # after model changes
 ./bin/versioning rev                                   # version bump
