@@ -125,7 +125,7 @@ fi
 
 # Optional migrations
 if [ "$RUN_MIGRATIONS" -eq 1 ]; then
-    local py
+    py=""
     if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
         py="$ROOT_DIR/.venv/bin/python"
     else
