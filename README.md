@@ -49,11 +49,14 @@ Add your app to `apps/apps.json`:
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uv pip install -r pyproject.toml --python .venv/bin/python
 ./bin/setup_local_postgres --migrate
 .venv/bin/python ./bin/manage.py runserver 9009
 ```
+
+Note: `pip install -e .` does not work — this repo is an app container, not a Python
+package (`[tool.uv] package = false`; there is nothing for the build backend to ship).
+Install the dependencies from `pyproject.toml` as above, or use `uv sync`.
 
 The first management command run prompts to initialize `var/` when it is absent. Accepting the
 prompt creates `var/django.conf` with a generated `SECRET_KEY` and safe local defaults. Add any
