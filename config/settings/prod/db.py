@@ -1,26 +1,26 @@
 # Production database configuration
 #
-# Credentials should come from var/django.conf overrides, not hardcoded here.
-# This file defines the structure; var/django.conf provides the values.
+# Credentials come from var/django.conf. django-mojo's config loader sets flat
+# settings globals only — nothing maps DATABASE_* into the DATABASES dict — so
+# this profile reads the conf itself and builds the dicts from it.
 #
-# Example var/django.conf:
-#   DATABASE_HOST = "your-rds-endpoint.region.rds.amazonaws.com"
-#   DATABASE_PORT = "5432"
-#   DATABASE_NAME = "my_mojo_project"
-#   DATABASE_USER = "postgres"
-#   DATABASE_PASSWORD = "your-password"
-#   REDIS_SERVER = "your-cache-endpoint.cache.amazonaws.com"
-#   REDIS_PORT = "6379"
+# Expected var/django.conf keys (written by aws/deploy.py's managed block):
+#   DATABASE_HOST, DATABASE_PORT, DATABASE_NAME, DATABASE_USER,
+#   DATABASE_PASSWORD, REDIS_SERVER, REDIS_PORT
+from mojo.helpers.settings.parser import DjangoConfigLoader
 
-REDIS_SERVER = ""       # Set via var/django.conf -> REDIS_SERVER
-REDIS_PORT = 6379       # Set via var/django.conf -> REDIS_PORT
+_conf = {}
+DjangoConfigLoader().load_config(_conf)
+
+REDIS_SERVER = _conf.get("REDIS_SERVER", "")
+REDIS_PORT = _conf.get("REDIS_PORT", 6379)
 
 CACHES = {
     "default": {
         "BACKEND": "mojo.cache.MojoRedisCache",
         "TIMEOUT": 300,
         "KEY_PREFIX": "mojo",
-        "LOCATION": "localhost:6379",  # Overridden by var/django.conf
+        "LOCATION": f"{REDIS_SERVER}:{REDIS_PORT}",
     }
 }
 
@@ -39,11 +39,11 @@ DATABASE_ROUTERS = []
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql_psycopg2',
-        'NAME': '',          # Set via var/django.conf -> DATABASE_NAME
-        'USER': '',          # Set via var/django.conf -> DATABASE_USER
-        'PASSWORD': '',      # Set via var/django.conf -> DATABASE_PASSWORD
-        'HOST': '',          # Set via var/django.conf -> DATABASE_HOST
-        'PORT': '5432',
+        'NAME': _conf.get("DATABASE_NAME", ""),
+        'USER': _conf.get("DATABASE_USER", ""),
+        'PASSWORD': _conf.get("DATABASE_PASSWORD", ""),
+        'HOST': _conf.get("DATABASE_HOST", ""),
+        'PORT': str(_conf.get("DATABASE_PORT", "5432")),
         'OPTIONS': {'sslmode': 'allow'}
     },
 }
