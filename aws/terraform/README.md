@@ -15,7 +15,7 @@ tenant DNS  ──A──▶  NLB Elastic IPs (static, one per AZ)
                      └── :80  TCP ──▶ <project>-<env>-certbot-targets  ONE node
                                                     │
   node (identical, N of them, public subnet)  ◀─────┘
-    nginx :80/:443 ── vhost by Host header ──▶ unix:/opt/api/var/asgi.sock
+    nginx :80/:443 ── vhost by Host header ──▶ unix:/run/mojo/asgi.sock
                      each node terminates TLS with its own copy of the lineage
 
   private subnets: Aurora PostgreSQL (encrypted, writer + reader)

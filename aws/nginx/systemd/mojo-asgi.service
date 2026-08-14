@@ -8,6 +8,12 @@ User=www
 Group=www
 PermissionsStartOnly=true
 
+# /run/mojo is the edge plane's socket convention — Upstream rows with
+# kind=unix must resolve under it (mojo.apps.edge.validators).
+RuntimeDirectory=mojo
+RuntimeDirectoryMode=0775
+RuntimeDirectoryPreserve=yes
+
 WorkingDirectory=/opt/api/bin
 
 Environment="DJANGO_SETTINGS_MODULE=settings"
@@ -21,14 +27,14 @@ ExecStartPre=/usr/bin/install -d -m 0775 -o www -g www /opt/api/var/logs
 ExecStartPre=/usr/bin/install -d -m 0775 -o www -g www /opt/api/var/pids
 ExecStartPre=/usr/sbin/restorecon -Rv /opt/api/var
 
-ExecStartPre=/usr/bin/rm -f /opt/api/var/asgi.sock
+ExecStartPre=/usr/bin/rm -f /run/mojo/asgi.sock
 
 UMask=007
 
 ExecStart=/usr/bin/env uvicorn \
   _asgi:application \
   --app-dir /opt/api/bin \
-  --uds /opt/api/var/asgi.sock \
+  --uds /run/mojo/asgi.sock \
   --workers 4 \
   --proxy-headers \
   --forwarded-allow-ips=${FORWARDED_ALLOW_IPS} \
