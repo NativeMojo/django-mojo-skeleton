@@ -120,20 +120,20 @@ matches `var/edge` itself). The `chown -R ec2-user:www` needs no exclusion:
 edge files are already ec2-user-owned and at 0600/0700 the group bits grant
 nothing whatever group is named.
 
-### The two settings that turn it on
+### The setting that turns it on
 
 In `config/settings/prod/__init__.py`:
 
 ```python
 EDGE_CONVERGE_ENABLED = True
-EDGE_RESERVED_SERVER_NAMES = ["api.example.com"]   # your own hostnames
 ```
 
-`EDGE_RESERVED_SERVER_NAMES` **fails closed**. The reserved set is
-`ALLOWED_HOSTS` (concrete entries only) plus this setting; with
-`ALLOWED_HOSTS = ["*"]` and this unset, **no vhost can be enabled at all**.
-Declare it — a deployment that cannot name its own hostname cannot protect it,
-and silently allowing every name is the shadowing attack.
+That is the whole switch. Earlier revisions also required
+`EDGE_RESERVED_SERVER_NAMES`, a fail-closed reservation list protecting the
+platform's own hostnames from vhost shadowing. That gate was retired upstream
+(edge migration `0005_remove_vhost_claims_reserved`): naming a vhost is now
+authorized per-domain — Domain ownership plus the `manage_dns` permission —
+so the setting no longer exists and nothing needs declaring here.
 
 ### The operator flow
 

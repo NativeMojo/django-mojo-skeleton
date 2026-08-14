@@ -44,7 +44,9 @@ EDGE_DEPLOY_BRANCH = "main"
 # including edge generations; and post_deploy.sh does not distribute conf.d,
 # so a node provisioned before this change needs aws/ec2_deploy.sh re-run
 # before it can opt in. See docs/django_developer/deployment/provisioning.md.
+# Flipping this on is the whole switch: vhost naming is authorized by Domain
+# ownership plus the manage_dns permission. (Earlier guidance also required
+# EDGE_RESERVED_SERVER_NAMES — that fail-closed gate was retired upstream in
+# edge migration 0005_remove_vhost_claims_reserved; the setting no longer
+# exists.)
 EDGE_CONVERGE_ENABLED = False
-# EDGE_RESERVED_SERVER_NAMES = ["api.example.com"]   # REQUIRED before enabling
-# convergence — it fails closed: with ALLOWED_HOSTS = ["*"] and this unset, no
-# vhost can be enabled at all.

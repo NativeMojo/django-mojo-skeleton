@@ -270,11 +270,14 @@ else
     ok "no unpruned chmod sweep survives"
 fi
 
-echo "settings: the opt-in is one edit, and the fail-closed setting is named"
+echo "settings: the opt-in is one edit, and the retired gate stays retired"
 assert_has "$PROD_SETTINGS" "^EDGE_CONVERGE_ENABLED = False$" "convergence ships off"
-assert_has "$PROD_SETTINGS" "^# EDGE_RESERVED_SERVER_NAMES = " \
-    "EDGE_RESERVED_SERVER_NAMES ships as a commented placeholder"
-assert_has "$PROD_SETTINGS" "fails closed" "with the fail-closed warning next to it"
+# EDGE_RESERVED_SERVER_NAMES was retired upstream (edge migration 0005) —
+# an assignment reappearing here would be dead config masquerading as a gate.
+assert_lacks "$PROD_SETTINGS" "^EDGE_RESERVED_SERVER_NAMES" \
+    "the retired EDGE_RESERVED_SERVER_NAMES setting is not assigned"
+assert_has "$PROD_SETTINGS" "0005_remove_vhost_claims_reserved" \
+    "with the retirement note naming the migration that dropped it"
 
 # ── Group G: syntax gates ────────────────────────────────────────────────────
 

@@ -156,9 +156,9 @@ sudo certbot --nginx -d <your-domain>
 The fleet path, once the portal is reachable, is the one to keep: seed the
 `DnsCredential` for the zone, add the domain in DNS → Certificates, request the
 certificate, then declare the upstream and the vhost. `EDGE_CONVERGE_ENABLED`
-must be `True` and `EDGE_RESERVED_SERVER_NAMES` must name the platform's own
-hostnames — it fails closed, and an unset value means no vhost can be enabled at
-all. Full procedure and prerequisites:
+must be `True`; vhost naming is authorized per-domain (Domain ownership plus
+the `manage_dns` permission — the old `EDGE_RESERVED_SERVER_NAMES` reservation
+gate was retired upstream). Full procedure and prerequisites:
 [`docs/django_developer/deployment/provisioning.md`](../docs/django_developer/deployment/provisioning.md).
 
 ---
