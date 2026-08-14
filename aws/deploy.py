@@ -1579,6 +1579,10 @@ def write_django_conf(region, db_endpoint, cache_endpoint):
         f'DATABASE_PASSWORD = "{DB_PASSWORD}"',
         f'REDIS_SERVER = "{cache_endpoint}"',
         'REDIS_PORT = "6379"',
+        # setup_cache() creates the replication group with
+        # TransitEncryptionEnabled=False, while mojo's redis client defaults
+        # to rediss (TLS) for any non-localhost host — pin the scheme to match.
+        'REDIS_SCHEME = "redis"',
         f'EMAIL_FROM = "{SES_FROM_EMAIL}"',
         f'GITHUB_WEBHOOK_SECRET = "{GITHUB_WEBHOOK_SECRET}"',
     ]
