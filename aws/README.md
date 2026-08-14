@@ -158,7 +158,10 @@ The fleet path, once the portal is reachable, is the one to keep: seed the
 certificate, then declare the upstream and the vhost. `EDGE_CONVERGE_ENABLED`
 must be `True`; vhost naming is authorized per-domain (Domain ownership plus
 the `manage_dns` permission — the old `EDGE_RESERVED_SERVER_NAMES` reservation
-gate was retired upstream). Full procedure and prerequisites:
+gate was retired upstream). The ACME account and certificate keys live in KMS:
+`aws/deploy.py` provisions the key (`--step kms`) and writes `KMS_KEY_ID` into
+the managed conf block — without it the certificate plane raises a
+`RuntimeError` at first use. Full procedure and prerequisites:
 [`docs/django_developer/deployment/provisioning.md`](../docs/django_developer/deployment/provisioning.md).
 
 ---

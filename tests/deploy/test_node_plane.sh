@@ -279,6 +279,13 @@ assert_lacks "$PROD_SETTINGS" "^EDGE_RESERVED_SERVER_NAMES" \
 assert_has "$PROD_SETTINGS" "0005_remove_vhost_claims_reserved" \
     "with the retirement note naming the migration that dropped it"
 
+echo "deploy.py: the KSMSecrets KMS key is provisioned and wired into the conf"
+# dnsman's AcmeAccount/Certificate are KSMSecrets models — no KMS_KEY_ID means
+# the certificate plane dies with RuntimeError on first use.
+assert_has "$DEPLOY_PY" "def setup_kms" "setup_kms exists"
+assert_has "$DEPLOY_PY" '"kms", "rds"' "kms runs as a step before the conf is written"
+assert_fixed "$DEPLOY_PY" "KMS_KEY_ID = " "KMS_KEY_ID reaches the managed conf block"
+
 # ── Group G: syntax gates ────────────────────────────────────────────────────
 
 echo "syntax"

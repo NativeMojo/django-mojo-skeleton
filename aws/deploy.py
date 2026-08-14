@@ -599,7 +599,46 @@ def setup_key_pair(session, region, dry_run=False):
     return key_name
 
 
-# ── Step 3: Aurora PostgreSQL ─────────────────────────────────────────────────
+# ── Step 3: KMS Secrets Key ───────────────────────────────────────────────────
+def setup_kms(session, dry_run=False):
+    """Customer-managed KMS key for KSMSecrets envelope encryption.
+
+    dnsman's AcmeAccount/Certificate models (and anything else built on
+    mojo.models.KSMSecrets) hard-require the KMS_KEY_ID setting — without it
+    the certificate plane dies with a RuntimeError on first use. Looked up by
+    alias so re-runs are free. No extra IAM wiring is needed: the deployed app
+    authenticates with the same AWS_KEY/AWS_SECRET this script runs under
+    (see write_django_conf), and terraform-provisioned nodes carry kms:* on
+    their instance role."""
+    kms = session.client("kms")
+    alias = f"alias/{PROJECT}-secrets"
+
+    try:
+        resp = kms.describe_key(KeyId=alias)
+        key_id = resp["KeyMetadata"]["KeyId"]
+        print(f"  ✓ KMS key '{alias}' already exists: {key_id}")
+        return key_id
+    except kms.exceptions.NotFoundException:
+        pass
+
+    if dry_run:
+        print(f"  [dry-run] Would create KMS key + alias: {alias}")
+        return "DRYRUN-kms-key-id"
+
+    resp = kms.create_key(
+        Description=f"{PROJECT} KSMSecrets envelope key (dnsman ACME account and certificate keys)",
+        Tags=[
+            {"TagKey": "Name", "TagValue": f"{PROJECT}-secrets"},
+            {"TagKey": "Project", "TagValue": PROJECT},
+        ],
+    )
+    key_id = resp["KeyMetadata"]["KeyId"]
+    kms.create_alias(AliasName=alias, TargetKeyId=key_id)
+    print(f"  ✓ Created KMS key {key_id} with alias '{alias}'")
+    return key_id
+
+
+# ── Step 4: Aurora PostgreSQL ─────────────────────────────────────────────────
 def _find_rds_cluster_id(rds):
     """Adopt an existing Aurora cluster even if it doesn't follow the
     {PROJECT} naming convention — this account only ever runs one cluster,
@@ -714,7 +753,7 @@ def setup_rds(session, vpc_id, sg_id, dry_run=False):
     return endpoint
 
 
-# ── Step 4: ElastiCache Valkey ────────────────────────────────────────────────
+# ── Step 5: ElastiCache Valkey ────────────────────────────────────────────────
 def setup_cache(session, vpc_id, sg_id, dry_run=False):
     ec = session.client("elasticache")
     ec2 = session.client("ec2")
@@ -784,7 +823,7 @@ def setup_cache(session, vpc_id, sg_id, dry_run=False):
     return endpoint
 
 
-# ── Step 5: EC2 Instance(s) ────────────────────────────────────────────────────
+# ── Step 6: EC2 Instance(s) ────────────────────────────────────────────────────
 def _node_hostname(i):
     """Hostname set on node i via TARGET_HOSTNAME."""
     return f"{PROJECT}-node{i}"
@@ -965,7 +1004,7 @@ def _register_missing_targets(elbv2, nodes, dry_run=False):
         print(f"  ✓ Registered {len(missing)} new node(s) in {tg_name}")
 
 
-# ── Step 6: Network Load Balancer (TCP passthrough, high tier only) ──────────
+# ── Step 7: Network Load Balancer (TCP passthrough, high tier only) ──────────
 def setup_nlb(session, vpc_id, nodes, dry_run=False):
     """Simple TCP-passthrough NLB across all nodes — TLS is still terminated by
     nginx on each node (certificates are installed per node by the dnsman/edge
@@ -1141,7 +1180,7 @@ rm -f /opt/api/var/pids/*.pid
     return ami_id
 
 
-# ── Step 7: EC2 Setup (SSH in and configure) ─────────────────────────────────
+# ── Step 8: EC2 Setup (SSH in and configure) ─────────────────────────────────
 def setup_ec2_environment(session, region, dry_run=False):
     """For every node: push var/django.conf, clone/pull the app repo via
     aws/remote_deploy.sh, then run migrations once from node 1 only."""
@@ -1234,7 +1273,7 @@ def setup_ec2_environment(session, region, dry_run=False):
             print(f"  ✓ Migrations applied")
 
 
-# ── Step 8: SES Domain Verification + DKIM ──────────────────────────────────
+# ── Step 9: SES Domain Verification + DKIM ──────────────────────────────────
 def setup_ses(session, region, dry_run=False):
     """Verify domain in SES and enable DKIM signing."""
     ses = session.client("ses")
@@ -1550,7 +1589,7 @@ DJANGO_CONF_BEGIN = "# ── BEGIN aws/deploy.py managed block — safe to edit
 DJANGO_CONF_END = "# ── END aws/deploy.py managed block ──"
 
 
-def write_django_conf(region, db_endpoint, cache_endpoint):
+def write_django_conf(region, db_endpoint, cache_endpoint, kms_key_id=""):
     """Merge deploy-derived settings into var/django.conf, replacing only the
     managed block between the markers — anything else in the file (SECRET_KEY,
     hand-added local-dev settings) is left untouched.
@@ -1586,6 +1625,10 @@ def write_django_conf(region, db_endpoint, cache_endpoint):
         f'EMAIL_FROM = "{SES_FROM_EMAIL}"',
         f'GITHUB_WEBHOOK_SECRET = "{GITHUB_WEBHOOK_SECRET}"',
     ]
+    if kms_key_id:
+        # KSMSecrets (dnsman AcmeAccount/Certificate envelope keys) raises at
+        # first use without this; setup_kms() provisions alias/<project>-secrets.
+        block.append(f'KMS_KEY_ID = "{kms_key_id}"')
     block.append(DJANGO_CONF_END)
 
     if DJANGO_CONF_BEGIN in lines:
@@ -1605,7 +1648,7 @@ def write_django_conf(region, db_endpoint, cache_endpoint):
         print(f"  NOTE: AWS_KEY/AWS_SECRET are blank — set them in {DEPLOY_JSON} and re-run.")
 
 
-# ── Step 9: GitHub Actions secret ────────────────────────────────────────────
+# ── Step 10: GitHub Actions secret ───────────────────────────────────────────
 def ensure_github_webhook(dry_run=False):
     """Create the GitHub push webhook that triggers fleet deploys —
     https://{DOMAIN}/api/github/deploy/webhook, content type json, signed
@@ -1678,7 +1721,7 @@ def ensure_github_webhook(dry_run=False):
     print()
 
 
-# ── Step 10: Verify (smoke test the fleet) ───────────────────────────────────
+# ── Step 11: Verify (smoke test the fleet) ───────────────────────────────────
 def verify_deployment(session, region, dry_run=False):
     """SSH into every node and check: nginx up, mojo-asgi up, jobman engine up,
     and DB/Redis connectivity via the app's own `manage.py status` (real
@@ -1756,7 +1799,7 @@ fi
 # Default full run — everything needed to get node1 live. "bake-ami" is
 # deliberately excluded: it's a manual, one-time action you run once node1 is
 # verified, not something a full run should silently redo.
-STEPS = ["sg", "key", "rds", "cache", "ec2", "nlb", "ec2-setup", "ses", "github-webhook", "verify"]
+STEPS = ["sg", "key", "kms", "rds", "cache", "ec2", "nlb", "ec2-setup", "ses", "github-webhook", "verify"]
 ALL_STEPS = STEPS + ["bake-ami"]
 
 
@@ -1805,6 +1848,7 @@ def main():
     sg_ids = {}
     db_endpoint = ""
     cache_endpoint = ""
+    kms_key_id = ""
     nodes = []
 
     # Always load existing SG IDs if skipping SG step. sg_ids keys ("node") are
@@ -1829,8 +1873,13 @@ def main():
             setup_key_pair(session, region, dry_run=args.dry_run)
             print()
 
+        elif step == "kms":
+            print("── Step 3: KMS Secrets Key ──")
+            kms_key_id = setup_kms(session, dry_run=args.dry_run)
+            print()
+
         elif step == "rds":
-            print("── Step 3: Aurora PostgreSQL ──")
+            print("── Step 4: Aurora PostgreSQL ──")
             if "rds" not in sg_ids:
                 print("  ERROR: RDS security group not found. Run --step sg first.")
                 continue
@@ -1838,7 +1887,7 @@ def main():
             print()
 
         elif step == "cache":
-            print("── Step 4: Valkey Cache ──")
+            print("── Step 5: Valkey Cache ──")
             if "cache" not in sg_ids:
                 print("  ERROR: Cache security group not found. Run --step sg first.")
                 continue
@@ -1850,12 +1899,12 @@ def main():
             # this same loop and needs the file to exist with fresh
             # DB/cache endpoints in it first.
             if db_endpoint and cache_endpoint and not args.dry_run:
-                write_django_conf(region, db_endpoint, cache_endpoint)
+                write_django_conf(region, db_endpoint, cache_endpoint, kms_key_id)
             elif db_endpoint and cache_endpoint:
                 print(f"  [dry-run] Would write DB/cache/token settings to {DJANGO_CONF}")
 
         elif step == "ec2":
-            print("── Step 5: EC2 Instance(s) ──")
+            print("── Step 6: EC2 Instance(s) ──")
             if "node" not in sg_ids:
                 print("  ERROR: Node security group not found. Run --step sg first.")
                 continue
@@ -1864,7 +1913,7 @@ def main():
             print()
 
         elif step == "nlb":
-            print("── Step 6: Network Load Balancer ──")
+            print("── Step 7: Network Load Balancer ──")
             if not nodes:
                 nodes = _find_nodes(session)
             if not nodes:
@@ -1879,22 +1928,22 @@ def main():
             print()
 
         elif step == "ec2-setup":
-            print("── Step 7: EC2 Environment Setup ──")
+            print("── Step 8: EC2 Environment Setup ──")
             setup_ec2_environment(session, region, dry_run=args.dry_run)
             print()
 
         elif step == "ses":
-            print("── Step 8: SES Email ──")
+            print("── Step 9: SES Email ──")
             setup_ses(session, region, dry_run=args.dry_run)
             print()
 
         elif step == "github-webhook":
-            print("── Step 9: GitHub Deploy Webhook ──")
+            print("── Step 10: GitHub Deploy Webhook ──")
             ensure_github_webhook(dry_run=args.dry_run)
             print()
 
         elif step == "verify":
-            print("── Step 10: Verify ──")
+            print("── Step 11: Verify ──")
             verify_deployment(session, region, dry_run=args.dry_run)
             print()
 

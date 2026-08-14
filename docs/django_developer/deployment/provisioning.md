@@ -59,7 +59,15 @@ node. **dnsman** issues and renews them centrally over ACME DNS-01 (the ACME
 account key is held in KMS, never on a box), and **`mojo.apps.edge`** is the
 node-side plane: it asks "what should I be serving?", renders the answer into a
 new generation under `EDGE_ROOT`, validates it against this node's real nginx
-configuration, and swaps a symlink. Nothing is pulled from S3, there is no
+configuration, and swaps a symlink.
+
+The KMS side is a hard prerequisite: dnsman's `AcmeAccount` and `Certificate`
+are `KSMSecrets` models, and KSMSecrets raises a `RuntimeError` at first use
+unless the `KMS_KEY_ID` setting is configured. `aws/deploy.py` provisions the
+key (`--step kms`, alias `alias/<project>-secrets`) and writes `KMS_KEY_ID`
+into `var/django.conf`'s managed block on a full run; a deployment provisioned
+before that step existed can run `python aws/deploy.py --step kms` once and add
+the printed key id to its conf. Nothing is pulled from S3, there is no
 primary and no replica, and a node that was switched off converges on its next
 sweep.
 
