@@ -1,3 +1,18 @@
+# WHO OWNS THE ALARMS: on a managed installation (INFRASTRUCTURE_MODE unset,
+# which is the default) the admin portal does. Setup -> AWS -> SNS and
+# CloudWatch creates its own topic and its own alarms against these same
+# instances, this same Aurora cluster and this same cache. Everything below is
+# behind var.enable_alarms for that reason, and both shipped tfvars set it
+# false. Turn it on only for an INFRASTRUCTURE_MODE = "external" installation,
+# where the portal refuses to create anything. See aws/terraform/README.md,
+# "Who owns this environment".
+#
+# CloudTrail, GuardDuty and the log groups at the bottom of this file are NOT
+# behind that flag — the portal creates none of them, it only audits them, so
+# they stay this module's regardless of who owns the alarms.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#
 # The alarm path: CloudWatch -> SNS -> django-mojo.
 #
 # The SNS topic delivers to /api/aws/cloudwatch/sns/alarm, where mojo's aws app
@@ -22,14 +37,16 @@ locals {
 }
 
 resource "aws_sns_topic" "alarms" {
+  count = var.enable_alarms ? 1 : 0
+
   name = "${local.name}-alarms"
   tags = { Name = "${local.name}-alarms" }
 }
 
 resource "aws_sns_topic_subscription" "mojo" {
-  count = var.alarm_endpoint != "" ? 1 : 0
+  count = var.enable_alarms && var.alarm_endpoint != "" ? 1 : 0
 
-  topic_arn = aws_sns_topic.alarms.arn
+  topic_arn = aws_sns_topic.alarms[0].arn
   protocol  = "https"
   endpoint  = var.alarm_endpoint
 
@@ -39,9 +56,9 @@ resource "aws_sns_topic_subscription" "mojo" {
 }
 
 resource "aws_sns_topic_subscription" "email" {
-  count = var.alarm_email != "" ? 1 : 0
+  count = var.enable_alarms && var.alarm_email != "" ? 1 : 0
 
-  topic_arn = aws_sns_topic.alarms.arn
+  topic_arn = aws_sns_topic.alarms[0].arn
   protocol  = "email"
   endpoint  = var.alarm_email
 }
@@ -49,7 +66,7 @@ resource "aws_sns_topic_subscription" "email" {
 # ── node alarms ──────────────────────────────────────────────────────────────
 
 resource "aws_cloudwatch_metric_alarm" "node_status" {
-  count = length(var.node_instance_ids)
+  count = var.enable_alarms ? length(var.node_instance_ids) : 0
 
   alarm_name          = "${local.name}-node-${count.index + 1}-status-check"
   alarm_description   = "EC2 or system status check failing — the instance is unreachable or impaired."
@@ -63,12 +80,12 @@ resource "aws_cloudwatch_metric_alarm" "node_status" {
   treat_missing_data  = "breaching"
 
   dimensions    = { InstanceId = var.node_instance_ids[count.index] }
-  alarm_actions = [aws_sns_topic.alarms.arn]
-  ok_actions    = [aws_sns_topic.alarms.arn]
+  alarm_actions = [aws_sns_topic.alarms[0].arn]
+  ok_actions    = [aws_sns_topic.alarms[0].arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "node_cpu" {
-  count = length(var.node_instance_ids)
+  count = var.enable_alarms ? length(var.node_instance_ids) : 0
 
   alarm_name          = "${local.name}-node-${count.index + 1}-cpu"
   alarm_description   = "Sustained high CPU."
@@ -82,12 +99,12 @@ resource "aws_cloudwatch_metric_alarm" "node_cpu" {
   treat_missing_data  = "missing"
 
   dimensions    = { InstanceId = var.node_instance_ids[count.index] }
-  alarm_actions = [aws_sns_topic.alarms.arn]
-  ok_actions    = [aws_sns_topic.alarms.arn]
+  alarm_actions = [aws_sns_topic.alarms[0].arn]
+  ok_actions    = [aws_sns_topic.alarms[0].arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "node_credits" {
-  count = local.node_is_burstable ? length(var.node_instance_ids) : 0
+  count = var.enable_alarms && local.node_is_burstable ? length(var.node_instance_ids) : 0
 
   alarm_name          = "${local.name}-node-${count.index + 1}-cpu-credits"
   alarm_description   = "CPU credit balance draining. Below zero the instance is throttled, which presents as unexplained slowness rather than an error."
@@ -101,8 +118,8 @@ resource "aws_cloudwatch_metric_alarm" "node_credits" {
   treat_missing_data  = "missing"
 
   dimensions    = { InstanceId = var.node_instance_ids[count.index] }
-  alarm_actions = [aws_sns_topic.alarms.arn]
-  ok_actions    = [aws_sns_topic.alarms.arn]
+  alarm_actions = [aws_sns_topic.alarms[0].arn]
+  ok_actions    = [aws_sns_topic.alarms[0].arn]
 }
 
 # ── load balancer ────────────────────────────────────────────────────────────
@@ -118,7 +135,7 @@ resource "aws_cloudwatch_metric_alarm" "node_credits" {
 # which is a plain input, so the key set is always known and the unknown values
 # stay where they are allowed to be — in the map's values.
 resource "aws_cloudwatch_metric_alarm" "unhealthy_targets" {
-  for_each = var.enable_lb_alarms ? {
+  for_each = var.enable_alarms && var.enable_lb_alarms ? {
     api     = var.api_target_group_arn_suffix
     certbot = var.certbot_target_group_arn_suffix
   } : {}
@@ -139,13 +156,15 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_targets" {
     TargetGroup  = each.value
   }
 
-  alarm_actions = [aws_sns_topic.alarms.arn]
-  ok_actions    = [aws_sns_topic.alarms.arn]
+  alarm_actions = [aws_sns_topic.alarms[0].arn]
+  ok_actions    = [aws_sns_topic.alarms[0].arn]
 }
 
 # ── database ─────────────────────────────────────────────────────────────────
 
 resource "aws_cloudwatch_metric_alarm" "db_cpu" {
+  count = var.enable_alarms ? 1 : 0
+
   alarm_name          = "${local.name}-db-cpu"
   alarm_description   = "Aurora CPU sustained high."
   namespace           = "AWS/RDS"
@@ -158,11 +177,13 @@ resource "aws_cloudwatch_metric_alarm" "db_cpu" {
   treat_missing_data  = "missing"
 
   dimensions    = { DBClusterIdentifier = var.db_cluster_id }
-  alarm_actions = [aws_sns_topic.alarms.arn]
-  ok_actions    = [aws_sns_topic.alarms.arn]
+  alarm_actions = [aws_sns_topic.alarms[0].arn]
+  ok_actions    = [aws_sns_topic.alarms[0].arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "db_memory" {
+  count = var.enable_alarms ? 1 : 0
+
   alarm_name          = "${local.name}-db-freeable-memory"
   alarm_description   = "Aurora freeable memory low — the next step is swapping and then connection failures."
   namespace           = "AWS/RDS"
@@ -175,11 +196,13 @@ resource "aws_cloudwatch_metric_alarm" "db_memory" {
   treat_missing_data  = "missing"
 
   dimensions    = { DBClusterIdentifier = var.db_cluster_id }
-  alarm_actions = [aws_sns_topic.alarms.arn]
-  ok_actions    = [aws_sns_topic.alarms.arn]
+  alarm_actions = [aws_sns_topic.alarms[0].arn]
+  ok_actions    = [aws_sns_topic.alarms[0].arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "db_connections" {
+  count = var.enable_alarms ? 1 : 0
+
   alarm_name          = "${local.name}-db-connections"
   alarm_description   = "Connection count climbing toward the instance limit."
   namespace           = "AWS/RDS"
@@ -192,12 +215,12 @@ resource "aws_cloudwatch_metric_alarm" "db_connections" {
   treat_missing_data  = "missing"
 
   dimensions    = { DBClusterIdentifier = var.db_cluster_id }
-  alarm_actions = [aws_sns_topic.alarms.arn]
-  ok_actions    = [aws_sns_topic.alarms.arn]
+  alarm_actions = [aws_sns_topic.alarms[0].arn]
+  ok_actions    = [aws_sns_topic.alarms[0].arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "db_credits" {
-  count = local.db_is_burstable ? 1 : 0
+  count = var.enable_alarms && local.db_is_burstable ? 1 : 0
 
   alarm_name          = "${local.name}-db-cpu-credits"
   alarm_description   = "Aurora CPU credit balance draining — the database will throttle rather than fail."
@@ -211,8 +234,8 @@ resource "aws_cloudwatch_metric_alarm" "db_credits" {
   treat_missing_data  = "missing"
 
   dimensions    = { DBClusterIdentifier = var.db_cluster_id }
-  alarm_actions = [aws_sns_topic.alarms.arn]
-  ok_actions    = [aws_sns_topic.alarms.arn]
+  alarm_actions = [aws_sns_topic.alarms[0].arn]
+  ok_actions    = [aws_sns_topic.alarms[0].arn]
 }
 
 # ── cache ────────────────────────────────────────────────────────────────────
@@ -221,6 +244,8 @@ resource "aws_cloudwatch_metric_alarm" "db_credits" {
 # entries to make room. Not a "high water mark" alarm; any sustained eviction is
 # the signal.
 resource "aws_cloudwatch_metric_alarm" "cache_evictions" {
+  count = var.enable_alarms ? 1 : 0
+
   alarm_name          = "${local.name}-cache-evictions"
   alarm_description   = "The cache is evicting entries — it is too small for the working set."
   namespace           = "AWS/ElastiCache"
@@ -233,11 +258,13 @@ resource "aws_cloudwatch_metric_alarm" "cache_evictions" {
   treat_missing_data  = "notBreaching"
 
   dimensions    = { ReplicationGroupId = var.cache_id }
-  alarm_actions = [aws_sns_topic.alarms.arn]
-  ok_actions    = [aws_sns_topic.alarms.arn]
+  alarm_actions = [aws_sns_topic.alarms[0].arn]
+  ok_actions    = [aws_sns_topic.alarms[0].arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "cache_cpu" {
+  count = var.enable_alarms ? 1 : 0
+
   alarm_name          = "${local.name}-cache-cpu"
   alarm_description   = "Cache CPU sustained high."
   namespace           = "AWS/ElastiCache"
@@ -250,8 +277,8 @@ resource "aws_cloudwatch_metric_alarm" "cache_cpu" {
   treat_missing_data  = "missing"
 
   dimensions    = { ReplicationGroupId = var.cache_id }
-  alarm_actions = [aws_sns_topic.alarms.arn]
-  ok_actions    = [aws_sns_topic.alarms.arn]
+  alarm_actions = [aws_sns_topic.alarms[0].arn]
+  ok_actions    = [aws_sns_topic.alarms[0].arn]
 }
 
 # ── audit trail and detection ────────────────────────────────────────────────
@@ -378,4 +405,42 @@ resource "aws_cloudwatch_log_group" "app" {
   retention_in_days = var.log_retention_days
 
   tags = { Name = "${local.name}-${each.key}" }
+}
+
+# ── state moves ──────────────────────────────────────────────────────────────
+#
+# These six resources gained a `count` when var.enable_alarms was introduced,
+# which renames their state addresses from <addr> to <addr>[0]. Without these
+# blocks an environment that already applied would see each one destroyed and
+# recreated — a new topic ARN, and every alarm rebuilt — purely because the
+# address changed. The other alarms already had a count or a for_each.
+
+moved {
+  from = aws_sns_topic.alarms
+  to   = aws_sns_topic.alarms[0]
+}
+
+moved {
+  from = aws_cloudwatch_metric_alarm.db_cpu
+  to   = aws_cloudwatch_metric_alarm.db_cpu[0]
+}
+
+moved {
+  from = aws_cloudwatch_metric_alarm.db_memory
+  to   = aws_cloudwatch_metric_alarm.db_memory[0]
+}
+
+moved {
+  from = aws_cloudwatch_metric_alarm.db_connections
+  to   = aws_cloudwatch_metric_alarm.db_connections[0]
+}
+
+moved {
+  from = aws_cloudwatch_metric_alarm.cache_evictions
+  to   = aws_cloudwatch_metric_alarm.cache_evictions[0]
+}
+
+moved {
+  from = aws_cloudwatch_metric_alarm.cache_cpu
+  to   = aws_cloudwatch_metric_alarm.cache_cpu[0]
 }

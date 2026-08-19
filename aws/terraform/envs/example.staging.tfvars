@@ -1,5 +1,10 @@
 # Staging — cheapest thing that runs the software honestly.
 #
+# THIS FILE DESCRIBES AN INFRASTRUCTURE_MODE = "external" ENVIRONMENT — OpenTofu
+# owns the estate and the admin portal refuses every mutating AWS endpoint. On a
+# default (managed) installation the portal is the owner and this file is not
+# applied at all. See README, "Who owns this environment".
+#
 # No load balancer: staging exists to test the application, not the topology, so
 # one node with its own Elastic IP and certbot straight on the box. That does
 # mean the multi-node certbot_sync path is never exercised here — worth adding a
@@ -33,6 +38,10 @@ db_deletion_protection   = false # staging gets torn down on purpose
 
 cache_snapshot_retention_days = 1
 
+# Off because the admin portal creates its own topic and alarms against these
+# same resources. See envs/example.prod.tfvars for the consequences of flipping
+# it on and back off again.
+enable_alarms      = false
 alarm_endpoint     = "" # set once the aws app is routed
 enable_cloudtrail  = false
 enable_guardduty   = false

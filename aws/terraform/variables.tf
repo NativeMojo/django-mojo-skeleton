@@ -243,11 +243,43 @@ variable "cache_snapshot_retention_days" {
 
 # ── observability ────────────────────────────────────────────────────────────
 
+variable "enable_alarms" {
+  description = <<-EOT
+    Create this root's SNS topic and its ten CloudWatch alarms.
+
+    ON A MANAGED INSTALLATION THE ADMIN PORTAL OWNS ALARMS. Setup -> AWS -> SNS
+    and CloudWatch creates the topic django-mojo-<slug>-operations and alarms
+    named django-mojo/<slug>/... against the same instances, the same Aurora
+    cluster and the same cache this root describes. The two naming schemes never
+    collide, so a duplicated alarm plane is easy to run for months without
+    noticing: two topics, two sets of alarms, two notifications per event.
+
+    Both shipped tfvars set this false, because the portal is the default owner.
+    Set it true only for an INFRASTRUCTURE_MODE = "external" installation where
+    the portal is refusing to create anything.
+
+    Turning it OFF on an environment that applied with it ON DESTROYS those
+    alarms and that topic. Re-enabling creates a NEW topic with a NEW ARN, so
+    AWS_CLOUDWATCH_ALARM_TOPIC_ARNS has to be re-pasted into var/django.conf and
+    any alarm_email subscription has to be re-confirmed by a human clicking the
+    link in the confirmation mail. Neither happens by itself, and an unconfirmed
+    subscription looks exactly like a quiet night.
+
+    CloudTrail, GuardDuty and log-group retention are NOT covered by this flag —
+    nothing in the portal creates those, so they stay this root's to own.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "alarm_endpoint" {
   description = <<-EOT
     HTTPS URL that CloudWatch alarms are delivered to via SNS — the django-mojo
     ingest at https://<api-host>/api/aws/cloudwatch/sns/alarm. It confirms the
     SNS subscription itself on first delivery.
+
+    Requires enable_alarms — with alarms off there is no topic to subscribe to
+    and this is ignored.
 
     Empty creates the topic with no subscriber, which is a topic that fires into
     nothing. Set it, and add the topic ARN to AWS_CLOUDWATCH_ALARM_TOPIC_ARNS.
@@ -257,7 +289,7 @@ variable "alarm_endpoint" {
 }
 
 variable "alarm_email" {
-  description = "Optional email subscription on the same topic, as a backstop for when the API itself is the thing that is down."
+  description = "Optional email subscription on the same topic, as a backstop for when the API itself is the thing that is down. Requires enable_alarms."
   type        = string
   default     = ""
 }
