@@ -50,3 +50,22 @@ EDGE_DEPLOY_BRANCH = "main"
 # edge migration 0005_remove_vhost_claims_reserved; the setting no longer
 # exists.)
 EDGE_CONVERGE_ENABLED = False
+
+# ── Who owns the AWS estate ──────────────────────────────────────────────────
+# UNSET (the default, and how this file ships) means "managed": the admin
+# portal creates and changes AWS resources directly — node capacity, Aurora and
+# cache engine versions, CloudWatch alarms, S3 buckets, SES identities. That is
+# the default a first stand-up with aws/deploy.py bootstraps into, and the
+# portal is then the owner of the running environment.
+#
+# Set "external" ONLY if aws/terraform/ or another IaC pipeline owns the
+# estate. It makes every mutating AWS endpoint in the portal answer 403 —
+# capacity changes, maintenance actions, resource creation — leaving the
+# read-only views working. An environment has exactly one owner; running both
+# provisioners fights over one Aurora cluster and one cache (see
+# aws/terraform/README.md, "Who owns this environment").
+#
+# Read with get_static, so this file is the only place it can be set — a DB
+# Setting row cannot re-arm the mutations it disables. Anything unrecognized
+# fails closed to external, i.e. to refusing.
+# INFRASTRUCTURE_MODE = "external"
