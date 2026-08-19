@@ -1,5 +1,10 @@
 # Production — the topology described in aws/terraform/README.md.
 #
+# THIS FILE DESCRIBES AN INFRASTRUCTURE_MODE = "external" ENVIRONMENT, i.e. one
+# where OpenTofu owns the estate and the admin portal refuses every mutating
+# AWS endpoint. On a default (managed) installation the portal is the owner and
+# this file is not applied at all. See README, "Who owns this environment".
+#
 # NLB in TCP passthrough, :443 across every node, :80 pointed at node 1 so ACME
 # challenges always land on the certbot host. Aurora writer + reader across two
 # AZs, encrypted. Cache with a replica so failover is automatic.
@@ -36,6 +41,14 @@ cache_snapshot_retention_days = 5
 
 # The django-mojo ingest. Needs mojo.apps.aws routed and the topic ARN in
 # AWS_CLOUDWATCH_ALARM_TOPIC_ARNS, or every delivery is rejected.
+# Off because the admin portal creates its own topic and its own alarms against
+# these same resources — two alarm planes, two pages per event. Flip to true
+# only if this environment has no portal doing that. Turning it back OFF later
+# DESTROYS the topic, and re-enabling mints a new ARN.
+enable_alarms = false
+
+# Both require enable_alarms; kept here so the wiring is obvious if it is ever
+# turned on.
 alarm_endpoint = "https://api.example.com/api/aws/cloudwatch/sns/alarm"
 alarm_email    = "ops@example.com" # backstop for when the API is what is down
 

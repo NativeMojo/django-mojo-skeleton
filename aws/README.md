@@ -48,6 +48,31 @@ Production and staging currently share one AWS account, separated by region.
 
 ## 2. Standing up a new environment
 
+**The default path: bootstrap once, then run it from the admin portal.** A
+django-mojo installation is portal-owned — `INFRASTRUCTURE_MODE` stays unset,
+which means `managed`. `aws/deploy.py` stands up the *first* environment,
+because nothing else creates a VPC, an Aurora cluster or an NLB from nothing:
+
+```bash
+python aws/deploy.py --init      # write var/deploy.json
+python aws/deploy.py             # provision the first environment
+```
+
+After that the portal owns the estate. Capacity, engine versions, alarms, S3
+and SES are changed in **Setup → AWS** and the Capacity screens, not by
+re-running the bootstrap script — see §9 and the authority block at the top of
+`aws/deploy.py`. Verify what you actually have with the audit in §9.
+
+### External-mode installations only — Terraform/OpenTofu
+
+Everything below applies **only** when this estate is owned by an infrastructure
+pipeline instead of the portal, i.e. `INFRASTRUCTURE_MODE = "external"`, which
+makes every mutating AWS endpoint in the portal answer 403. An environment has
+exactly one owner; running both provisioners fights over one Aurora cluster and
+one cache. Read
+[`terraform/README.md`](terraform/README.md) → "Who owns this environment"
+first — it lists the concrete failures.
+
 Everything is described in Terraform (we use OpenTofu; the files work with
 either). One file per environment describes the whole thing.
 
@@ -258,8 +283,12 @@ the whole reason the old copies were deleted: the skeleton is a template you
 clone once, and a fix made in one clone never reaches the others.
 
 **Built and tested**
-- Terraform for the whole environment (network, load balancer, nodes, database,
-  cache, alarms)
+- The OpenTofu root parses, formats and validates, and describes the whole
+  environment (network, load balancer, nodes, database, cache, alarms). It is
+  the `INFRASTRUCTURE_MODE = "external"` artifact, **not the default path** —
+  a managed installation is bootstrapped by `aws/deploy.py` and then owned by
+  the admin portal. Its CloudWatch alarms now ship **off** (`enable_alarms =
+  false` in both example tfvars) because the portal creates its own.
 - dnsman certificate issuance and renewal (DNS-01, ACME account key in KMS)
 - the `mojo.apps.edge` node-side plane — renders vhosts and certificate
   material into a generation, validates against the node's real nginx config,
@@ -269,6 +298,14 @@ clone once, and a fix made in one clone never reaches the others.
 **Not built**
 - Website and API code sync, the rolling deploy, CloudTrail, the
   certificate-expiry alarm
+
+**Known problems**
+- **Three provisioners exist for one estate**: the admin portal (the owner on a
+  managed installation), `aws/deploy.py` (first stand-up only), and the
+  OpenTofu root (external mode only). Only one may own a live environment, and
+  nothing enforces that beyond `INFRASTRUCTURE_MODE` and the documentation —
+  the two script paths will each happily adopt the other's Aurora cluster and
+  cache. See `aws/terraform/README.md`, "Who owns this environment".
 
 **Known problems in the current single-machine setup**
 - The deploy script ignores failures — a failed migration or dependency install
@@ -283,9 +320,10 @@ clone once, and a fix made in one clone never reaches the others.
 
 | | |
 |---|---|
-| `aws/terraform/` | the whole environment as code |
-| `aws/terraform/envs/` | one file per environment |
-| `aws/*.sh`, `aws/deploy.py` | scripts that provision and update the machines |
+| `aws/terraform/` | the whole environment as code — **external mode only**, not the default path |
+| `aws/terraform/envs/` | one file per external-mode environment |
+| `aws/deploy.py` | **first-environment bootstrap** — not the owner of a running environment; the admin portal is |
+| `aws/*.sh` | scripts that provision and update the machines |
 | `aws/nginx/` | web server config, the systemd units, the edge sudoers rule |
 | `python3 -m mojo.deploy.check_setup` | audits a live AWS account against this design |
 | `docs/django_developer/multi_node_deployment_plan.md` | why it is built this way |

@@ -2,6 +2,45 @@
 """
 AWS Infrastructure Setup
 
+AUTHORITY — READ THIS BEFORE RE-RUNNING ANYTHING
+
+This is a FIRST STAND-UP BOOTSTRAP. It exists because nothing else creates a
+VPC, an Aurora cluster or an NLB out of an empty account. It is NOT the owner
+of a running environment.
+
+After go-live the admin portal owns the AWS estate: node capacity, Aurora and
+cache engine versions, CloudWatch alarms, S3 buckets and SES identities are
+created and changed from Setup -> AWS and the Capacity screens. That is the
+default (INFRASTRUCTURE_MODE unset = "managed"). Change infrastructure there.
+
+Re-running this against a converged environment fights the portal, and the two
+worst collisions are silent:
+
+  A. THE DATABASE AUTHENTICATES AGAINST NOTHING. _find_rds_cluster_id adopts
+     whatever cluster it finds (the only one in the account, or any id starting
+     "<PROJECT>-"), then write_django_conf() writes that adopted endpoint as
+     DATABASE_HOST paired with DATABASE_PASSWORD from var/deploy.json — a
+     password that was never set on that cluster. Right host, wrong credential,
+     and it presents as a connectivity problem.
+
+  B. TLS IS OFF BY ONE SCHEME. The managed conf block pins
+     REDIS_SCHEME = "redis". A cache created with transit encryption required —
+     which is how aws/terraform/ creates it, and how the portal can create it —
+     refuses every connection at the handshake.
+
+Node instances do NOT collide: _find_nodes matches only the tag
+Name = <PROJECT>-<i>, so a node the portal added is invisible here. That cuts
+both ways — `--step nlb` will not register it with the load balancer, and
+`--step ec2-setup` will not push config to it. The config-sync timer pulls
+django.conf from S3 on its own, so the config half takes care of itself; the
+NLB registration does not.
+
+See aws/terraform/README.md, "Who owns this environment", for the full picture
+and for the INFRASTRUCTURE_MODE = "external" path, where aws/terraform/ owns
+the estate instead and the portal refuses every mutating endpoint.
+
+──────────────────────────────────────────────────────────────────────────────
+
 var/deploy.json is the single source of truth for everything this script
 tracks. Build it either way:
   - Interactively: `python aws/deploy.py --init` prompts for domain, region,
@@ -17,6 +56,13 @@ tracks. Build it either way:
     PEM_PATH (see pem_file_path() — defaults to aws/{project}-{region}.pem,
     override for setups with their own key storage convention, e.g.
     "~/.ssh/idents/{project}.pem").
+
+    THE CAPACITY DIALS ARE BOOTSTRAP-ONLY. INSTANCE_TYPE, EC2_COUNT,
+    DB_INSTANCE_CLASS, DB_READER_COUNT, CACHE_NODE_TYPE and CACHE_NUM_NODES
+    describe the shape of the FIRST stand-up. After that, change capacity in
+    the admin portal — never here. Editing them on a live environment does not
+    reshape it; it re-describes it, and the next full run acts on the
+    difference.
 
 The GitHub repo is never asked for or stored by default — it's auto-detected
 from `git remote get-url origin` each time it's needed (see
@@ -49,6 +95,10 @@ Creates (default full run — see PHASES below for the recommended order):
   6. Network Load Balancer, TCP passthrough on 80/443 (high tier only)
   7. EC2 environment setup (push var/django.conf, clone+deploy app, run migrations)
   8. SES domain verification + DKIM + SNS bounce/complaint/delivery hooks
+     — DUPLICATED by the portal's Setup -> AWS -> SES, which does the same job
+       against the same identity. On a live environment prefer the portal; this
+       step is here so a first stand-up has working mail before there is a
+       portal to click.
   9. GitHub push webhook (/api/github/deploy/webhook, secret GITHUB_WEBHOOK_SECRET)
   10. Verify — SSH smoke test of nginx/mojo-asgi/jobman/DB/cache on every node
 
@@ -1835,6 +1885,15 @@ def main():
     print(f"  {'='*50}\n")
 
     if not args.yes and not args.dry_run:
+        # This script bootstraps a FIRST environment. On a converged one the
+        # admin portal is the owner, and a full run here will re-adopt its
+        # database and cache and rewrite var/django.conf from var/deploy.json.
+        # See the AUTHORITY block at the top of this file.
+        print("  This is a first stand-up bootstrap, not the owner of a running environment.")
+        print("  On a live environment the admin portal owns capacity, engine versions,")
+        print("  alarms and SES — change those there, not here. Re-running this against a")
+        print("  converged environment can write a DATABASE_PASSWORD its database never had.")
+        print("  See the AUTHORITY block at the top of aws/deploy.py.\n")
         confirm = input(f"  Deploy to {region}? [y/N] ")
         if confirm.lower() != "y":
             print("  Aborted.")

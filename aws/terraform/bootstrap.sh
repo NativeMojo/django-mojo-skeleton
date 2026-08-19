@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Create the OpenTofu/Terraform state backend for one AWS account.
 #
+# AUTHORITY: this is step zero of the SECOND provisioner. A django-mojo
+# installation is portal-owned by default (INFRASTRUCTURE_MODE unset = managed,
+# the admin portal creates and changes AWS resources directly); the OpenTofu
+# root beside this file is the INFRASTRUCTURE_MODE = "external" path, and an
+# environment has exactly one owner. If you have not decided that OpenTofu owns
+# this estate, you do not need a state bucket yet. See README.md, "Who owns
+# this environment".
+#
 # Chicken-and-egg: state has to live somewhere before the first `tofu init`, so
 # this is plain AWS CLI rather than Terraform. Run it once per account, before
 # anything else. It is idempotent — re-running against an existing bucket and
@@ -26,7 +34,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --region)  REGION="$2"; shift 2 ;;
         --profile) PROFILE="$2"; shift 2 ;;
-        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done

@@ -40,6 +40,11 @@ variable "certbot_target_group_arn_suffix" {
   default = ""
 }
 
+variable "enable_alarms" {
+  description = "Create the SNS topic and the CloudWatch alarms. Off means the admin portal owns them — see the root's enable_alarms. No default: the root always passes it."
+  type        = bool
+}
+
 variable "alarm_endpoint" { type = string }
 variable "alarm_email" { type = string }
 variable "enable_cloudtrail" { type = bool }

@@ -286,6 +286,97 @@ assert_has "$DEPLOY_PY" "def setup_kms" "setup_kms exists"
 assert_has "$DEPLOY_PY" '"kms", "rds"' "kms runs as a step before the conf is written"
 assert_fixed "$DEPLOY_PY" "KMS_KEY_ID = " "KMS_KEY_ID reaches the managed conf block"
 
+# ── Group F2: one provisioner owns one environment ───────────────────────────
+#
+# The skeleton ships three things that can create AWS resources: the admin
+# portal (the owner on a managed installation), aws/deploy.py (first stand-up
+# only) and the OpenTofu root (INFRASTRUCTURE_MODE = "external" only). Nothing
+# in code can stop an operator running two of them, so what is asserted here is
+# that the skeleton SAYS which one owns an environment, and that the one place
+# the duplication is silent — the alarm plane — ships off.
+
+TF_VARS="$REPO/aws/terraform/variables.tf"
+TF_MAIN="$REPO/aws/terraform/main.tf"
+TF_OUTPUTS="$REPO/aws/terraform/outputs.tf"
+TF_README="$REPO/aws/terraform/README.md"
+OBS_MAIN="$REPO/aws/terraform/modules/observability/main.tf"
+OBS_VARS="$REPO/aws/terraform/modules/observability/variables.tf"
+PROD_TFVARS="$REPO/aws/terraform/envs/example.prod.tfvars"
+STAGING_TFVARS="$REPO/aws/terraform/envs/example.staging.tfvars"
+AWS_README="$REPO/aws/README.md"
+
+echo "terraform: the alarm plane is a flag, and it defaults to this root owning it"
+assert_fixed "$TF_VARS" 'variable "enable_alarms" {' "the root declares enable_alarms"
+awk '/^variable "enable_alarms" \{/{f=1} f{print} f&&/^\}/{exit}' "$TF_VARS" > "$TMP/enable_alarms"
+assert_has "$TMP/enable_alarms" "^  type        = bool$" "enable_alarms is a bool"
+assert_has "$TMP/enable_alarms" "^  default     = true$" \
+    "and defaults true — this root's own behaviour, for the external-mode installation it is written for"
+assert_has "$TF_MAIN" "^  enable_alarms      = var.enable_alarms$" \
+    "the root passes it into the observability module"
+assert_fixed "$OBS_VARS" 'variable "enable_alarms" {' "the module accepts it"
+awk '/^variable "enable_alarms" \{/{f=1} f{print} f&&/^\}/{exit}' "$OBS_VARS" > "$TMP/mod_enable_alarms"
+assert_lacks "$TMP/mod_enable_alarms" "^ *default *=" "with no default in the module — the root always passes it"
+
+echo "terraform: both shipped environments leave the alarms to the admin portal"
+for f in "$PROD_TFVARS" "$STAGING_TFVARS"; do
+    assert_has "$f" "^enable_alarms *= false$" "$(basename "$f") sets enable_alarms = false"
+    assert_fixed "$f" 'INFRASTRUCTURE_MODE' "$(basename "$f") says which mode it describes"
+done
+
+echo "observability: every alarm and the topic are behind the flag"
+assert_lacks "$OBS_MAIN" "aws_sns_topic\.alarms\.arn" \
+    "no unindexed topic reference survives the count"
+assert_has "$OBS_MAIN" "^  count = var.enable_alarms ? 1 : 0$" "the topic is counted off"
+assert_has "$OBS_MAIN" "^  count = var.enable_alarms ? length(var.node_instance_ids) : 0$" \
+    "so are the per-node alarms"
+assert_fixed "$OBS_MAIN" "for_each = var.enable_alarms && var.enable_lb_alarms ? {" \
+    "and the target-health alarms, without losing the plan-time key set"
+moved="$(grep -c '^moved {' "$OBS_MAIN")"
+assert_eq "$moved" "6" "the six newly-counted resources carry moved blocks (no destroy/recreate on upgrade)"
+assert_fixed "$OBS_MAIN" "moved {" "the moved blocks are present at all"
+
+echo "observability: the audit trail is NOT part of the alarm flag"
+# Nothing in the portal creates CloudTrail, GuardDuty or the log groups — it
+# only audits them — so they stay this root's whoever owns the alarms.
+assert_has "$OBS_MAIN" "^  count = var.enable_cloudtrail ? 1 : 0$" "cloudtrail keeps its own gate"
+assert_has "$OBS_MAIN" "^  count = var.enable_guardduty ? 1 : 0$" "guardduty keeps its own gate"
+assert_fixed "$OBS_MAIN" 'for_each = toset(["nginx-access", "nginx-error", "app"])' \
+    "and the log groups are created unconditionally"
+
+echo "terraform: the conf fragment writes no alarm topic it does not own"
+assert_fixed "$TF_OUTPUTS" '%{if var.enable_alarms~}' "the fragment is conditional on enable_alarms"
+assert_fixed "$TF_OUTPUTS" 'the admin portal owns the alarms' \
+    "and says who owns the key when it is omitted"
+
+echo "docs: the tofu root states which installation it is for"
+assert_fixed "$TF_README" "## Who owns this environment" "the README opens with the ownership section"
+assert_fixed "$TF_README" 'INFRASTRUCTURE_MODE = "external"' "and names the mode that selects this root"
+assert_fixed "$TF_README" "Do not run both" "with the do-not-run-both warning"
+# Contradicted by the same file and by modules/nodes/main.tf, which creates
+# aws_iam_role.node with the django-mojo-setup inline policy.
+assert_lacks "$TF_README" "No IAM role is attached to the nodes" \
+    "the false no-instance-profile claim is gone"
+assert_fixed "$AWS_README" "External-mode installations only" \
+    "the operator guide files the tofu path under external mode"
+
+echo "deploy.py: it says it is a bootstrap, and points at the ownership section"
+assert_fixed "$DEPLOY_PY" "This is a FIRST STAND-UP BOOTSTRAP" \
+    "the docstring leads with what this script is"
+assert_fixed "$DEPLOY_PY" 'aws/terraform/README.md, "Who owns this environment"' \
+    "and points at the ownership section"
+assert_fixed "$DEPLOY_PY" "first stand-up bootstrap, not the owner of a running environment." \
+    "the deploy confirm warns before anything is created"
+# The provisioning steps stay: removing them is deferred, and a silent trim
+# here would strand a first stand-up with no way to create anything.
+assert_fixed "$DEPLOY_PY" '"ec2-setup", "ses", "github-webhook", "verify"' \
+    "the provisioning steps are untouched"
+
+echo "settings: the mode selector ships commented out, and fails closed when set"
+assert_has "$PROD_SETTINGS" '^# INFRASTRUCTURE_MODE = "external"$' \
+    "INFRASTRUCTURE_MODE is documented but not set"
+assert_lacks "$PROD_SETTINGS" "^INFRASTRUCTURE_MODE" \
+    "so a fresh clone is managed — the portal owns the estate"
+
 # ── Group G: syntax gates ────────────────────────────────────────────────────
 
 echo "syntax"

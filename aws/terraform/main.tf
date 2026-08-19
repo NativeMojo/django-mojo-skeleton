@@ -1,5 +1,16 @@
 # Root module. One environment per state file — see versions.tf for the backend
 # key convention.
+#
+# ── authority ────────────────────────────────────────────────────────────────
+#
+# This root is the INFRASTRUCTURE_MODE = "external" path, and only that path. A
+# django-mojo installation is portal-owned by default: with INFRASTRUCTURE_MODE
+# unset the admin portal creates and changes capacity, engine versions, alarms,
+# S3 and SES directly, and these files are not in the loop. An environment has
+# exactly ONE infrastructure owner — running both provisioners against one
+# estate fights over the same Aurora cluster and the same cache.
+#
+# See aws/terraform/README.md, "Who owns this environment", before applying.
 
 # ── capacity presets ─────────────────────────────────────────────────────────
 #
@@ -161,6 +172,7 @@ module "observability" {
   api_target_group_arn_suffix     = var.use_nlb ? module.nlb[0].api_target_group_arn_suffix : ""
   certbot_target_group_arn_suffix = var.use_nlb ? module.nlb[0].certbot_target_group_arn_suffix : ""
 
+  enable_alarms      = var.enable_alarms
   alarm_endpoint     = var.alarm_endpoint
   alarm_email        = var.alarm_email
   enable_cloudtrail  = var.enable_cloudtrail
