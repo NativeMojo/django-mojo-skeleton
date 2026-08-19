@@ -58,5 +58,7 @@ Dict responses are auto-wrapped as `{status: True, data: RESP}` when: no `status
 1. Code follows conventions above
 2. Tests added/updated where needed
 3. Docs updated for both tracks when behavior changed
-4. `CHANGELOG.md` updated if behavior or API changed
-5. Final summary: what changed, why, commands to validate
+4. Final summary: what changed, why, commands to validate
+
+Behavior and API changes are recorded on the maestro work item, never in a
+`CHANGELOG.md` — the board is the changelog.

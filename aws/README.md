@@ -263,8 +263,13 @@ design is that a node fixes itself, so a node stuck on old code is usually a nod
 that cannot reach S3 — check its credentials and its outbound network.
 
 **Something changed and nobody knows who**
-CloudTrail records every AWS action. **[PLANNED]** — not enabled yet, which is
-itself worth fixing.
+CloudTrail records every AWS action. Whether you have it depends on which path
+stood the environment up: the OpenTofu root creates a multi-region trail
+(`enable_cloudtrail`, default on), but that root is for
+`INFRASTRUCTURE_MODE=external` installations only. On the default path —
+`aws/deploy.py` bootstrap plus the admin portal — **nothing creates CloudTrail**,
+and enabling it is worth doing. `python3 -m mojo.deploy.check_setup` reports
+whether it is on.
 
 ---
 
