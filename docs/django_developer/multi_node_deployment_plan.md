@@ -26,6 +26,15 @@
 >   fixed: `ec2_deploy.sh` calls `node_setup`, which installs and enables both
 >   units. Wherever this document names `aws/config_sync.py` or
 >   `aws/check_setup.py` by path, read the module instead.
+> - **Infrastructure authority was settled portal-direct on 2026-08-19.** A
+>   django-mojo installation is owned by the admin portal by default
+>   (`INFRASTRUCTURE_MODE` unset = `managed`); `aws/terraform/` is the
+>   `INFRASTRUCTURE_MODE = "external"` artifact and `aws/deploy.py` is the
+>   first-environment bootstrap, not the owner of a running one. Wherever this
+>   document says something is "already built in `aws/terraform/`", read that as
+>   describing the external-mode artifact rather than the default path. See
+>   [`aws/terraform/README.md`](../../aws/terraform/README.md), "Who owns this
+>   environment".
 >
 > Current state lives in
 > [`deployment/provisioning.md`](deployment/provisioning.md).

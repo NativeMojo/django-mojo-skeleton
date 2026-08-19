@@ -1,5 +1,40 @@
 # Provisioning
 
+## Who owns the infrastructure
+
+**Portal-direct, by default.** A django-mojo installation leaves
+`INFRASTRUCTURE_MODE` unset, which means `managed`: the admin portal creates and
+changes AWS resources itself — node capacity, Aurora and cache engine versions,
+CloudWatch alarms, S3 buckets, SES identities — from **Setup → AWS** and the
+Capacity screens. That is the source of truth for a running environment.
+
+**`aws/deploy.py` is the bootstrap for the first environment, not its owner.**
+It exists because nothing else creates a VPC, an Aurora cluster or an NLB out of
+an empty account. Once the portal is up and the environment has converged, stop
+re-running it: it adopts the cluster and cache it finds and rewrites
+`var/django.conf` from `var/deploy.json`, which is how a converged environment
+acquires a `DATABASE_PASSWORD` that was never set on its database. The authority
+block at the top of the module spells out each failure. `--step kms` is likewise
+bootstrap-only — the KMS key it provisions is created once and then simply
+exists.
+
+**`INFRASTRUCTURE_MODE = "external"` selects the OpenTofu path.** Set it in
+`config/settings/prod/__init__.py` when `aws/terraform/` (or any other IaC
+pipeline) owns the estate. Every mutating AWS endpoint in the portal then
+answers 403, which is what makes a single owner enforceable rather than merely
+agreed. See [`aws/terraform/README.md`](../../../aws/terraform/README.md),
+"Who owns this environment".
+
+Whichever mode you are in, the two things to run afterwards are the portal's
+**System Setup** flow, which walks the required AWS pieces and reports what is
+missing, and the read-only audit:
+
+```bash
+python3 -m mojo.deploy.check_setup --config ./var/django.conf
+```
+
+## First stand-up
+
 First-time AWS infra setup is `aws/deploy.py` — security groups, Aurora
 PostgreSQL, ElastiCache Valkey, EC2 instance(s), and (for the `high` volume
 tier) a Network Load Balancer. Read the module docstring at the top of

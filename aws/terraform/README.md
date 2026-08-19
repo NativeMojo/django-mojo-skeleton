@@ -6,6 +6,97 @@ environment; a new environment should be a new `.tfvars` and nothing else.
 Written against OpenTofu 1.12 and the AWS provider 5.x. HCL is identical for
 HashiCorp Terraform ≥1.5 — substitute `terraform` for `tofu` throughout.
 
+## Who owns this environment
+
+**A django-mojo installation is portal-owned by default.** With
+`INFRASTRUCTURE_MODE` unset — which is what a fresh install ships as, and what
+it means to be `managed` — the admin portal creates and changes the AWS estate
+directly: node capacity, Aurora and cache engine versions, CloudWatch alarms
+and their SNS topic, S3 buckets, SES identities. It does that live, from the
+Setup and Capacity screens, against the same account these files describe.
+
+**These files are for `INFRASTRUCTURE_MODE = "external"` installations only.**
+That setting tells django-mojo that something else owns the estate, and every
+mutating AWS endpoint in the portal then answers 403 instead of calling AWS.
+Set it in `config/settings/prod/__init__.py`, where it is read with
+`get_static` — a file, never a database `Setting` row, so settings-write access
+cannot re-arm the mutations it disables.
+
+An environment has **exactly one** infrastructure owner. Pick it before the
+first apply.
+
+### Do not run both
+
+Both provisioners resolve the *same* database and the *same* cache, so this is
+not two estates side by side — it is two owners of one estate.
+
+- **Failure A — the database authenticates against nothing.** This root sets
+  the Aurora master password from `random_password.db`, which only ever exists
+  in the state file. `aws/deploy.py` adopts an existing cluster (singleton, or
+  any id starting `<PROJECT>-`, which `<project>-<env>-cluster` matches) and
+  writes the adopted endpoint as `DATABASE_HOST` — paired with the
+  `DATABASE_PASSWORD` from `var/deploy.json`, a password that was never set on
+  that cluster. Right host, wrong credential, and the failure reads as a
+  connectivity problem.
+- **Failure B — TLS is off by one scheme.** The cache created here requires
+  transit encryption, so clients must use `rediss`. `aws/deploy.py`'s managed
+  conf block pins `REDIS_SCHEME = "redis"`. Adopt one and write the other and
+  every cache connection is refused at the handshake.
+- **Engine versions go backwards, and the cache does not survive it.** This
+  root pins `db_engine_version` and `cache_engine_version`. After the portal
+  upgrades either one, the next `tofu apply` proposes a *decrease* back to the
+  pinned value. An `engine_version` decrease on an `aws_elasticache_replication_group`
+  is not an in-place modify — the provider **replaces** the group. Total cache
+  loss and a new primary endpoint, from a plan line that looks like a version
+  string being tidied up.
+- **`num_cache_clusters` reverts.** A replica the portal added is not in this
+  state, so the next apply removes it.
+- **Capacity numbers stop describing the fleet.** Nodes and Aurora readers the
+  portal created are invisible to `tofu plan` — not adopted, and not deleted
+  either. They keep running and keep billing while the tfvars `size` claims a
+  smaller environment than the one that exists.
+
+Node *instances* are the one namespace that is genuinely disjoint: this root
+names them `<project><i>`, `aws/deploy.py` tags them `Name = <PROJECT>-<i>`,
+and the portal names them `<base>-<instance-id-suffix>`. Nothing else is. **RDS
+and ElastiCache are explicitly not disjoint** — the adoption rules above are
+what make them collide.
+
+**If an environment is already mixed, pick one owner before the next apply.**
+Deciding afterwards means deciding from a plan.
+
+### Alarms
+
+`enable_alarms` ships **false** in both tfvars, because the alarm plane is the
+one place the duplication is invisible until it pages you twice.
+
+| owner | topic | alarms |
+|---|---|---|
+| admin portal (`managed`) | `django-mojo-<slug>-operations` | `django-mojo/<slug>/...` |
+| this root (`external`) | `<project>-<env>-alarms` | `<project>-<env>-...` |
+
+**The two schemes never collide**, which is exactly why a duplicated alarm
+plane runs for months without anybody noticing: two topics, ten alarms twice,
+two notifications per event, and nothing errors.
+
+If you do set `enable_alarms = true` — which is the right answer for an
+external-mode installation — the portal will report ten CloudWatch alarms it
+does not own. That is correct behaviour, not a bug: the portal's detection is
+owner-based (it looks for its own `managed-by: django-mojo` tag), and this
+root's provider `default_tags` set `ManagedBy = "opentofu"`. Expect the report.
+
+Turning `enable_alarms` back **off** on an environment that applied with it on
+**destroys** those ten alarms and the topic. Re-enabling later creates a **new
+topic with a new ARN**, so `AWS_CLOUDWATCH_ALARM_TOPIC_ARNS` has to be
+re-pasted into `var/django.conf` and any `alarm_email` subscription has to be
+re-confirmed by a human clicking the link in the confirmation mail. Until they
+do, the topic looks healthy and delivers to nobody.
+
+**CloudTrail, GuardDuty and log-group retention are not part of this.** Nothing
+in the portal creates them — the setup audit only checks whether they exist —
+so they stay owned by this root regardless of who owns the alarms, and they are
+deliberately outside `enable_alarms`.
+
 ## The topology
 
 ```
@@ -57,6 +148,10 @@ HTTP-01.
 > `docs/django_developer/deployment/provisioning.md`.
 
 ## Standing up an environment
+
+> Everything below assumes you have read "Who owns this environment" and
+> decided that OpenTofu is the owner here. On a default managed installation
+> this is not the path — the portal is.
 
 ```bash
 # once per AWS account — creates the state bucket and lock table
@@ -219,12 +314,6 @@ looks like nothing at all for 90 days.
 **Provisioning.** Terraform creates instances and sets their hostname; the
 software on them comes from the AMI or from `aws/ec2_bootstrap.sh`. Terraform has
 no good story for re-running provisioning logic, so it does not own any.
-
-**Instance profiles.** No IAM role is attached to the nodes. The fileman S3
-backend currently requires explicit credentials and cannot use an ambient
-credential chain, so a role would not be usable — see the django-mojo board item
-on ambient credentials + AssumeRole. Once that lands, add a role here and drop
-`AWS_KEY`/`AWS_SECRET` from `django.conf`.
 
 **Certificates.** Issuance and renewal live in dnsman, and node-side
 installation in `mojo.apps.edge`. Adding a tenant domain is a certificate

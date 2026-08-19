@@ -12,7 +12,10 @@
 *.plan.bin
 
 # envs/*.tfvars ARE COMMITTED, deliberately. A project's .tfvars IS its
-# infrastructure definition — region, sizes, node counts, which AMI. Keeping it
+# infrastructure definition — for an INFRASTRUCTURE_MODE = "external"
+# installation, the one where OpenTofu owns the estate rather than the admin
+# portal (see README.md, "Who owns this environment"). Region, sizes, node
+# counts, which AMI. Keeping it
 # out of git would mean the one file describing what this environment actually
 # is exists only on somebody's laptop, which defeats the point of writing the
 # infrastructure down at all.

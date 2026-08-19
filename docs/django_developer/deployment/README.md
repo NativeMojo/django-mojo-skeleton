@@ -1,6 +1,8 @@
 # Deployment
 
-- [Provisioning](provisioning.md) — first-time AWS infra setup via `aws/deploy.py`
+- [Provisioning](provisioning.md) — **who owns the infrastructure** (the admin
+  portal by default; OpenTofu under `INFRASTRUCTURE_MODE = "external"`), and
+  first-time AWS stand-up via `aws/deploy.py`
 - [Updating code](updating.md) — **start here**: how a push becomes a canary
   fleet deploy, the three update triggers, migrations, and the one-time
   cutover checklist from the legacy broadcast flow

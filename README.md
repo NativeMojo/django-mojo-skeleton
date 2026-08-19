@@ -64,8 +64,12 @@ environment-specific credentials yourself; initialization does not generate or d
 
 ### 5. Deploy to AWS
 
+`aws/deploy.py` stands the **first** environment up; after that the admin portal
+owns the AWS estate (capacity, engine versions, alarms, S3, SES) unless you set
+`INFRASTRUCTURE_MODE = "external"`. See [`aws/README.md`](aws/README.md) §2.
+
 ```bash
-# Provision infrastructure
+# Provision the first environment
 python aws/deploy.py
 
 # On EC2 (after bootstrap runs via user_data):
@@ -110,7 +114,7 @@ AWS, and other environment credentials remain operator-supplied in every deploym
 | `ec2_bootstrap.sh` | System-level EC2 setup (curl one-liner, no repo needed) |
 | `ec2_deploy.sh` | Project-specific setup (after git clone) |
 | `post_deploy.sh` | Post-deployment updates |
-| `deploy.py` | AWS infrastructure provisioning (SG, RDS, ElastiCache, EC2) |
+| `deploy.py` | First-environment AWS bootstrap (SG, KMS, RDS, ElastiCache, EC2, NLB) — not the owner of a running environment |
 | `nginx/` | Full nginx config with TLS, security headers, bot blocking |
 | `nginx/systemd/` | systemd service files |
 
