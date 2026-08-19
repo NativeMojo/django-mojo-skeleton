@@ -10,6 +10,7 @@
         "mojo.apps.dnsman",
         "mojo.apps.edge",
         "mojo.apps.github",
+        "mojo.apps.aws",
         "django.contrib.auth",
         "django.contrib.contenttypes",
         "django.contrib.sessions",
