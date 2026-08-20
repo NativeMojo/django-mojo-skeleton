@@ -69,6 +69,7 @@ SERVICE="$UNIT_DIR/config-sync.service"
 TIMER="$UNIT_DIR/config-sync.timer"
 APP_CONF="$REPO/aws/nginx/conf.d/app.conf"
 MOJO_CONF="$REPO/aws/nginx/conf.d/mojo.conf"
+NGINX_CONF="$REPO/aws/nginx/nginx.conf"
 PROD_SETTINGS="$REPO/config/settings/prod/__init__.py"
 TF_NODES="$REPO/aws/terraform/modules/nodes/main.tf"
 
@@ -269,10 +270,36 @@ else
     fail "the visudo gate does not clearly guard the install"
 fi
 
-echo "nginx: the edge include ships, and is inert until a generation exists"
-assert_has "$MOJO_CONF" "^include /opt/api/var/edge/current/conf.d/\*\.conf;$" \
-    "conf.d/mojo.conf is the one-line edge include"
-assert_eq "$(wc -l < "$MOJO_CONF" | tr -d ' ')" "1" "and it is exactly one line"
+echo "nginx: the edge include ships whole, and is inert until a generation exists"
+# BOTH globs, and http.d first. Including only conf.d stages the vhosts and
+# leaves every `proxy_pass http://edge_up_N` naming an upstream nginx never
+# read, and every `if ($edge_block_ip)` naming a map that does not exist —
+# `nginx -t` fails with "host not found in upstream", which reads like DNS.
+assert_has "$MOJO_CONF" "^include /opt/api/var/edge/current/http\.d/\*\.conf;$" \
+    "conf.d/mojo.conf includes the rendered http base and upstreams"
+assert_has "$MOJO_CONF" "^include /opt/api/var/edge/current/conf\.d/\*\.conf;$" \
+    "conf.d/mojo.conf includes the rendered vhosts"
+http_line="$(grep -n '^include .*http\.d' "$MOJO_CONF" | cut -d: -f1)"
+conf_line="$(grep -n '^include .*edge/current/conf\.d' "$MOJO_CONF" | cut -d: -f1)"
+if [ -n "$http_line" ] && [ -n "$conf_line" ] && [ "$http_line" -lt "$conf_line" ]; then
+    ok "the base and upstreams are included before the vhosts that use them"
+else
+    fail "http.d must be included before conf.d (got ${http_line:-none} and ${conf_line:-none})"
+fi
+
+echo "nginx: the bootstrap owns only what must exist before a generation does"
+# The rendered base declares these; a second copy at http level is an [emerg].
+# Directives only — the file EXPLAINS the split in its header, so a plain grep
+# would match the prose describing what it deliberately does not declare.
+grep -v '^[[:space:]]*#' "$NGINX_CONF" > "$TMP/nginx.directives"
+for directive in "include.*mime\.types" "log_format" "access_log" "\$loggable"; do
+    assert_lacks "$TMP/nginx.directives" "$directive" \
+        "the rendered http base owns ${directive}, not the bootstrap"
+done
+# And the one map that must stay: app.conf proxies through asgi.inc, which
+# references it, and a fresh box starts nginx before it can ever converge.
+assert_has "$NGINX_CONF" "map \$http_upgrade \$connection_upgrade" \
+    "the bootstrap keeps \$connection_upgrade so day 0 works"
 
 echo "ec2_deploy.sh: EDGE_ROOT is created, owned by the account that writes it"
 assert_has "$DEPLOY_SH" 'mkdir -p "${PROJ_PATH}/var/edge"' "var/edge is created"
