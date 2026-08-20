@@ -44,8 +44,29 @@ WWW="$REPO/aws/ec2_www.sh"
 DEPLOY_SH="$REPO/aws/ec2_deploy.sh"
 DEPLOY_PY="$REPO/aws/deploy.py"
 SUDOERS="$REPO/aws/nginx/sudoers.d/mojo-edge"
-SERVICE="$REPO/aws/nginx/systemd/config-sync.service"
-TIMER="$REPO/aws/nginx/systemd/config-sync.timer"
+# The systemd units are django-mojo's, not this project's. This repo used to
+# keep its own copies under aws/nginx/systemd/, which `mojo.deploy render`
+# ignored as undeclared collisions — the framework template wins — so the
+# copies were inert while looking authoritative. They are gone; assert against
+# what the node actually installs.
+#
+# Resolved through whichever interpreter can actually see django-mojo: a node
+# has it on the system python, a developer checkout has it in the uv
+# environment, and a test that silently skipped when neither worked would be
+# worse than one that fails loudly.
+find_unit_dir() {
+    local expr='import os, mojo.deploy; print(os.path.join(os.path.dirname(mojo.deploy.__file__), "templates", "systemd"))'
+    local out
+    for py in "python3" ".venv/bin/python"; do
+        out="$("$py" -c "$expr" 2>/dev/null)" && [ -n "$out" ] && { echo "$out"; return 0; }
+    done
+    out="$(cd "$REPO" && uv run --quiet python -c "$expr" 2>/dev/null)" \
+        && [ -n "$out" ] && { echo "$out"; return 0; }
+    return 1
+}
+UNIT_DIR="$(find_unit_dir)" || fail "django-mojo is not importable by any interpreter — cannot audit the systemd units it ships"
+SERVICE="$UNIT_DIR/config-sync.service"
+TIMER="$UNIT_DIR/config-sync.timer"
 APP_CONF="$REPO/aws/nginx/conf.d/app.conf"
 MOJO_CONF="$REPO/aws/nginx/conf.d/mojo.conf"
 PROD_SETTINGS="$REPO/config/settings/prod/__init__.py"

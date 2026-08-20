@@ -161,7 +161,12 @@ echo "the callers still name bin/jobman, not the module"
 # A cron line naming a packaged module would freeze that name in /etc/cron.d on
 # every provisioned node forever — there is no cron-convergence plane. The shim
 # lives in the clone update.sh refreshes on every deploy, so it stays fixable.
-assert_has "$REPO/aws/update.sh" "\./bin/jobman stop" "update.sh stops the engine through the shim"
+# `aws/update.sh` here is the three-line shim; the caller this contract is
+# about lives in the packaged script the shim execs, so locate that.
+UPDATE_SH="$(python3 -m mojo.deploy locate update.sh 2>/dev/null \
+    || (cd "$REPO" && uv run --quiet python -m mojo.deploy locate update.sh 2>/dev/null))"
+[ -n "$UPDATE_SH" ] || fail "cannot locate the packaged update.sh — is django-mojo installed?"
+assert_has "$UPDATE_SH" "\./bin/jobman stop" "update.sh stops the engine through the shim"
 
 # ── result ───────────────────────────────────────────────────────────────────
 
