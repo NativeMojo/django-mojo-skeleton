@@ -72,6 +72,8 @@ MOJO_CONF="$REPO/aws/nginx/conf.d/mojo.conf"
 NGINX_CONF="$REPO/aws/nginx/nginx.conf"
 PROD_SETTINGS="$REPO/config/settings/prod/__init__.py"
 TF_NODES="$REPO/aws/terraform/modules/nodes/main.tf"
+TF_STAGING="$REPO/aws/terraform/envs/example.staging.tfvars"
+TF_PROD="$REPO/aws/terraform/envs/example.prod.tfvars"
 
 # Remapping /usr/bin/python3 to the application interpreter must not break
 # distro tools. AWS CLI's AL2023 launcher includes both whitespace after #!
@@ -102,6 +104,22 @@ for service in route53domains s3 ec2 rds elasticache iam cloudwatch sns ses guar
     assert_has "$TF_NODES" "\"${service}:\\*\"" \
         "the setup role includes ${service} provisioning"
 done
+assert_fixed "$TF_NODES" 'data "aws_partition" "current"' \
+    "the AMI parameter ARN derives the active AWS partition"
+assert_fixed "$TF_NODES" 'data "aws_region" "current"' \
+    "the AMI parameter ARN derives the active AWS region"
+assert_fixed "$TF_NODES" 'Sid      = "DjangoMojoAmiParameter"' \
+    "the AMI parameter read is isolated in its own policy statement"
+assert_fixed "$TF_NODES" 'Action   = ["ssm:GetParameter"]' \
+    "the AMI parameter grant is read-only and exact"
+assert_fixed "$TF_NODES" 'Resource = "arn:${data.aws_partition.current.partition}:ssm:${data.aws_region.current.name}::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"' \
+    "the AMI parameter grant is exact within the active region"
+assert_lacks "$TF_NODES" '"ssm:\*"' \
+    "the node role has no wildcard SSM permission"
+assert_fixed "$TF_STAGING" 'region  = "us-west-2"' \
+    "the dynamic policy covers the shipped staging region"
+assert_fixed "$TF_PROD" 'region  = "us-east-1"' \
+    "the dynamic policy covers the shipped production region"
 
 # Every file #1611 deleted: three logic copies whose packaged replacements ship
 # in django-mojo, and seven orphans nothing referenced.
@@ -164,6 +182,8 @@ assert_has "$TIMER" "^Documentation=https://" "config-sync.timer documents a URL
 echo "ec2_deploy.sh: the three convergence actions come from the package"
 assert_has "$DEPLOY_SH" "python3 -m mojo.deploy.node_setup --root" \
     "ec2_deploy.sh calls the packaged node_setup"
+assert_fixed "$DEPLOY_SH" 'python3 -m mojo.deploy.node_setup --root "$PROJ_PATH" --units-dir "${PROJ_PATH}/var/deploy/systemd"' \
+    "ec2_deploy.sh installs the systemd contract rendered by stage 1"
 assert_lacks "$DEPLOY_SH" "cp -f .*systemd" "it no longer copies systemd units itself"
 # The cron node_setup writes still names bin/jobman, not the module behind it:
 # /etc/cron.d is written once at provisioning time and there is no

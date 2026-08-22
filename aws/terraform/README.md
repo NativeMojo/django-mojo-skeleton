@@ -184,7 +184,10 @@ Its `django-mojo-setup` policy intentionally covers the AWS services used while
 building an environment: domains and DNS, EC2/NLB/RDS/ElastiCache, S3, SES,
 IAM/KMS, CloudWatch/Logs/CloudTrail/SNS, and GuardDuty/EventBridge. That is the
 node's setup credential—do not add static `AWS_KEY`/`AWS_SECRET` values to
-`django.conf`. Once the environment and admin portal can reproduce the complete
+`django.conf`. A separate statement permits only `ssm:GetParameter` for the
+public AL2023 x86_64 AMI parameter in the environment's configured AWS
+partition and region; it grants no SSM wildcard or write action. Once the
+environment and admin portal can reproduce the complete
 setup, the inline policy can be replaced in place with a runtime-only policy;
 the instances do not need to be rebuilt.
 

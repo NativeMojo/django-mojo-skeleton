@@ -111,7 +111,7 @@ fi
 # plane to correct it; bin/jobman is a launcher inside the clone update.sh
 # refreshes on every deploy, so it stays correctable.
 log "Converging node (systemd units, var dirs, jobs cron)..."
-python3 -m mojo.deploy.node_setup --root "$PROJ_PATH"
+python3 -m mojo.deploy.node_setup --root "$PROJ_PATH" --units-dir "${PROJ_PATH}/var/deploy/systemd"
 
 # var/edge is the edge plane's root (EDGE_ROOT). ec2-user owns it because the
 # job engine — which runs the edge installer — is ec2-user. Created here

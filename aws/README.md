@@ -287,6 +287,11 @@ reaches this environment without anybody re-copying a script into it. That is
 the whole reason the old copies were deleted: the skeleton is a template you
 clone once, and a fix made in one clone never reaches the others.
 
+Stage 1 renders the installed framework's deploy assets into
+`var/deploy/systemd/`. `ec2_deploy.sh` passes that directory explicitly to
+`mojo.deploy.node_setup`, so the units installed on a node always match the
+pinned django-mojo package.
+
 **Built and tested**
 - The OpenTofu root parses, formats and validates, and describes the whole
   environment (network, load balancer, nodes, database, cache, alarms). It is
@@ -329,7 +334,8 @@ clone once, and a fix made in one clone never reaches the others.
 | `aws/terraform/envs/` | one file per external-mode environment |
 | `aws/deploy.py` | **first-environment bootstrap** — not the owner of a running environment; the admin portal is |
 | `aws/*.sh` | scripts that provision and update the machines |
-| `aws/nginx/` | web server config, the systemd units, the edge sudoers rule |
+| `aws/nginx/` | web server config and the edge sudoers rule |
+| `var/deploy/systemd/` | systemd units rendered from the pinned django-mojo package |
 | `python3 -m mojo.deploy.check_setup` | audits a live AWS account against this design |
 | `docs/django_developer/multi_node_deployment_plan.md` | why it is built this way |
 

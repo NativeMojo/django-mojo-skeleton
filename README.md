@@ -116,7 +116,7 @@ AWS, and other environment credentials remain operator-supplied in every deploym
 | `post_deploy.sh` | Post-deployment updates |
 | `deploy.py` | First-environment AWS bootstrap (SG, KMS, RDS, ElastiCache, EC2, NLB) — not the owner of a running environment |
 | `nginx/` | Full nginx config with TLS, security headers, bot blocking |
-| `nginx/systemd/` | systemd service files |
+| `var/deploy/systemd/` | Framework-rendered systemd units consumed during node convergence |
 
 ### `.claude/rules/` — Claude Code conventions
 Framework-specific rules for AI-assisted development. Ensures consistent code patterns.

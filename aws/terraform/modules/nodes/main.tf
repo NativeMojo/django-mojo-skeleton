@@ -20,6 +20,9 @@ data "aws_ami" "al2023" {
   }
 }
 
+data "aws_partition" "current" {}
+data "aws_region" "current" {}
+
 locals {
   name = "${var.project}-${var.env}"
   ami  = var.node_ami != "" ? var.node_ami : data.aws_ami.al2023[0].id
@@ -56,33 +59,41 @@ resource "aws_iam_role_policy" "node_setup" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Sid    = "DjangoMojoEnvironmentSetup"
-      Effect = "Allow"
-      Action = [
-        "route53domains:*",
-        "route53:*",
-        "s3:*",
-        "ec2:*",
-        "elasticloadbalancing:*",
-        "autoscaling:*",
-        "rds:*",
-        "elasticache:*",
-        "acm:*",
-        "iam:*",
-        "sts:AssumeRole",
-        "kms:*",
-        "cloudwatch:*",
-        "logs:*",
-        "cloudtrail:*",
-        "ce:GetCostAndUsage",
-        "sns:*",
-        "ses:*",
-        "guardduty:*",
-        "events:*",
-      ]
-      Resource = "*"
-    }]
+    Statement = [
+      {
+        Sid    = "DjangoMojoEnvironmentSetup"
+        Effect = "Allow"
+        Action = [
+          "route53domains:*",
+          "route53:*",
+          "s3:*",
+          "ec2:*",
+          "elasticloadbalancing:*",
+          "autoscaling:*",
+          "rds:*",
+          "elasticache:*",
+          "acm:*",
+          "iam:*",
+          "sts:AssumeRole",
+          "kms:*",
+          "cloudwatch:*",
+          "logs:*",
+          "cloudtrail:*",
+          "ce:GetCostAndUsage",
+          "sns:*",
+          "ses:*",
+          "guardduty:*",
+          "events:*",
+        ]
+        Resource = "*"
+      },
+      {
+        Sid      = "DjangoMojoAmiParameter"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = "arn:${data.aws_partition.current.partition}:ssm:${data.aws_region.current.name}::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+      },
+    ]
   })
 }
 
