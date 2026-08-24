@@ -1,0 +1,4 @@
+{
+  "budgets": {"core": 30},
+  "default_preset": "framework"
+}
