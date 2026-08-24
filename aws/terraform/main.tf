@@ -37,18 +37,18 @@ locals {
       node_count      = 2
       node_type       = "t3.medium"
       db_class        = "db.t4g.medium"
-      db_reader_count = 1
+      db_reader_count = 0
       cache_type      = "cache.t4g.small"
-      cache_replicas  = 1
+      cache_replicas  = 0
     }
-    # small -> medium deliberately changes COUNTS ONLY, not instance types.
+    # small -> medium deliberately changes application-node counts only, not
+    # instance types or the data-plane redundancy posture.
     #
     # That is what makes it a seamless step: adding nodes and adding readers are
     # both purely additive, while changing an EC2 instance_type requires a
     # stop/start and changing an Aurora instance_class restarts the writer.
-    # Scaling stateless API nodes horizontally is the right axis anyway, and
-    # readers are how you take read load off the writer — growing the writer is
-    # a different problem with a different signal.
+    # Readers and cache replicas are explicit opt-ins below: capacity presets
+    # must not silently double or triple the standing data-plane bill.
     #
     # The cache node type does grow here, because a cache cannot be scaled by
     # adding replicas; it is sized by working set. That single change is the one
@@ -57,9 +57,9 @@ locals {
       node_count      = 4
       node_type       = "t3.medium"
       db_class        = "db.t4g.medium"
-      db_reader_count = 2
+      db_reader_count = 0
       cache_type      = "cache.t4g.medium"
-      cache_replicas  = 1
+      cache_replicas  = 0
     }
 
     # large DOES change instance types, and is therefore NOT a seamless step —
@@ -70,9 +70,9 @@ locals {
       node_count      = 6
       node_type       = "m6i.large"
       db_class        = "db.r6g.xlarge"
-      db_reader_count = 2
+      db_reader_count = 0
       cache_type      = "cache.r7g.large"
-      cache_replicas  = 2
+      cache_replicas  = 0
     }
   }
 

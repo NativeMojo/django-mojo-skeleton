@@ -391,6 +391,34 @@ for f in "$PROD_TFVARS" "$STAGING_TFVARS"; do
     assert_fixed "$f" 'INFRASTRUCTURE_MODE' "$(basename "$f") says which mode it describes"
 done
 
+echo "capacity defaults: paid data-plane redundancy is explicit, never implied"
+assert_eq "$(grep -c '^      db_reader_count = 0$' "$TF_MAIN")" "4" \
+    "every OpenTofu size preset defaults to one Aurora writer"
+assert_eq "$(grep -c '^      cache_replicas  = 0$' "$TF_MAIN")" "4" \
+    "every OpenTofu size preset defaults to one cache node"
+assert_has "$PROD_TFVARS" '^db_reader_count = 0$' \
+    "the production example makes its writer-only choice explicit"
+assert_has "$PROD_TFVARS" '^cache_replicas  = 0$' \
+    "the production example makes its single-cache choice explicit"
+python3 - "$DEPLOY_PY" <<'PY'
+import ast
+import sys
+
+tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+tiers = None
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "TIER_DEFAULTS"
+            for target in node.targets):
+        tiers = ast.literal_eval(node.value)
+        break
+assert tiers, "TIER_DEFAULTS is missing"
+assert all(row["DB_READER_COUNT"] == 0 for row in tiers.values()), tiers
+assert all(row["CACHE_NUM_NODES"] == 1 for row in tiers.values()), tiers
+PY
+assert_eq "$?" "0" \
+    "every bootstrap tier defaults to one Aurora writer and one cache node"
+
 echo "observability: every alarm and the topic are behind the flag"
 assert_lacks "$OBS_MAIN" "aws_sns_topic\.alarms\.arn" \
     "no unindexed topic reference survives the count"

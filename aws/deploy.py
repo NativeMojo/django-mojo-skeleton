@@ -82,9 +82,9 @@ be folded into deploy.json itself; see write_django_conf().
 
 Volume tiers (edit var/deploy.json to override any value):
   low     1x t3.small EC2, Aurora db.t3.medium (writer only), Valkey cache.t4g.small x1
-  medium  1x t3.medium EC2, Aurora db.t3.medium (1 writer + 1 reader), Valkey cache.t3.medium x2
-  high    2x t3.medium EC2 behind an NLB, Aurora db.t3.medium (1 writer + 2 readers),
-          Valkey cache.t3.medium x3
+  medium  1x t3.medium EC2, Aurora db.t3.medium (writer only), Valkey cache.t3.medium x1
+  high    2x t3.medium EC2 behind an NLB, Aurora db.t3.medium (writer only),
+          Valkey cache.t3.medium x1
 
 Creates (default full run — see PHASES below for the recommended order):
   1. Security groups (node: 22/80/443 open; rds + cache: node-SG only, no public access)
@@ -293,14 +293,14 @@ TIER_DEFAULTS = {
     },
     "medium": {
         "INSTANCE_TYPE": "t3.medium", "EC2_COUNT": 1,
-        "DB_INSTANCE_CLASS": "db.t3.medium", "DB_READER_COUNT": 1,
-        "CACHE_NODE_TYPE": "cache.t3.medium", "CACHE_NUM_NODES": 2,
+        "DB_INSTANCE_CLASS": "db.t3.medium", "DB_READER_COUNT": 0,
+        "CACHE_NODE_TYPE": "cache.t3.medium", "CACHE_NUM_NODES": 1,
         "USE_NLB": False,
     },
     "high": {
         "INSTANCE_TYPE": "t3.medium", "EC2_COUNT": 2,
-        "DB_INSTANCE_CLASS": "db.t3.medium", "DB_READER_COUNT": 2,
-        "CACHE_NODE_TYPE": "cache.t3.medium", "CACHE_NUM_NODES": 3,
+        "DB_INSTANCE_CLASS": "db.t3.medium", "DB_READER_COUNT": 0,
+        "CACHE_NODE_TYPE": "cache.t3.medium", "CACHE_NUM_NODES": 1,
         "USE_NLB": True,
     },
 }
@@ -777,8 +777,9 @@ def setup_rds(session, vpc_id, sg_id, dry_run=False):
     )
     print(f"  ✓ Cluster creating...")
 
-    # Create writer + reader instances — Aurora elects the first instance as
-    # writer automatically; readers are just additional instances in the cluster.
+    # Create the writer plus any explicitly requested readers. Aurora elects
+    # the first instance as writer automatically; readers are opt-in because
+    # every one is another always-on database instance.
     for i in range(1, DB_READER_COUNT + 2):
         instance_id = f"{cluster_id}-instance-{i}"
         role = "writer" if i == 1 else "reader"

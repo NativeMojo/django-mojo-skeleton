@@ -51,14 +51,15 @@ variable "az_count" {
 
 variable "size" {
   description = <<-EOT
-    Capacity preset. Sets node count, instance types, reader count and cache
-    size together, so an environment is described by one word rather than six
-    numbers that can drift out of proportion to each other.
+    Capacity preset. Sets application-node count and instance sizes together.
+    Database readers and cache replicas remain zero unless explicitly enabled,
+    so selecting a larger size never silently adds expensive Multi-AZ data
+    resources.
 
-      micro   1 node,  0 readers, 1 cache node   — staging; not survivable
-      small   2 nodes, 1 reader,  2 cache nodes  — production floor
-      medium  4 nodes, 2 readers, 2 cache nodes  — same instance types as small
-      large   6 nodes, 2 readers, 3 cache nodes  — larger types; needs a window
+      micro   1 node,  0 readers, 1 cache node   — smallest footprint
+      small   2 nodes, 0 readers, 1 cache node   — normal production default
+      medium  4 nodes, 0 readers, 1 cache node   — larger cache node
+      large   6 nodes, 0 readers, 1 cache node   — larger types; needs a window
 
     small -> medium changes counts only, which is what makes it a live step.
     -> large changes instance types and does not apply cleanly in one go; see
@@ -176,7 +177,9 @@ variable "db_reader_count" {
     Readers in addition to the writer. Null takes the size preset.
 
     Zero means there is no standby: an instance failure becomes a restore rather
-    than a sub-minute automatic promotion. Only acceptable in staging.
+    than a sub-minute automatic promotion. This is the cost-conscious default;
+    set a positive count only when the application's availability requirement
+    justifies the additional always-on database instances.
 
     Adding a reader later is additive and causes no interruption — Aurora builds
     it from the shared cluster volume and it joins when ready.
@@ -227,9 +230,9 @@ variable "cache_replicas" {
   description = <<-EOT
     Replicas beyond the primary. Null takes the size preset.
 
-    1+ enables automatic failover and Multi-AZ; 0 means losing the primary is
-    manual intervention, acceptable only where the cache holds nothing you mind
-    rebuilding.
+    1+ enables automatic failover and Multi-AZ. Zero is the cost-conscious
+    default for a rebuildable cache; opt in only when cache continuity is worth
+    the additional always-on nodes.
   EOT
   type        = number
   default     = null

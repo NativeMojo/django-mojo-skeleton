@@ -6,8 +6,9 @@
 # this file is not applied at all. See README, "Who owns this environment".
 #
 # NLB in TCP passthrough, :443 across every node, :80 pointed at node 1 so ACME
-# challenges always land on the certbot host. Aurora writer + reader across two
-# AZs, encrypted. Cache with a replica so failover is automatic.
+# challenges always land on the certbot host. Aurora and Valkey are encrypted
+# single-node data services by default; paid readers/replicas are explicit
+# availability choices, not implied by "production".
 #
 # PRIMARY_BALANCER_HOST in var/django.conf must equal `tofu output
 # primary_balancer_host`, which gatekeeper_index below selects.
@@ -16,10 +17,13 @@ project = "example"
 env     = "prod"
 region  = "us-east-1"
 
-# 2 nodes, 1 writer + 1 reader, 2 cache nodes. Move to "medium" for 4 nodes,
-# 2 readers and larger cache — see README, "Changing capacity", for which parts
-# of that change are seamless and which are not.
+# 2 application nodes, 1 Aurora writer, 1 cache node. Move to "medium" for four
+# application nodes and a larger cache node. Readers and cache replicas remain
+# opt-in regardless of the size preset.
 size = "small"
+
+db_reader_count = 0
+cache_replicas  = 0
 
 az_count = 2
 

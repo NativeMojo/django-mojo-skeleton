@@ -109,8 +109,8 @@ tenant DNS  ──A──▶  NLB Elastic IPs (static, one per AZ)
     nginx :80/:443 ── vhost by Host header ──▶ unix:/run/mojo/asgi.sock
                      each node terminates TLS with its own copy of the lineage
 
-  private subnets: Aurora PostgreSQL (encrypted, writer + reader)
-                   ElastiCache Valkey (encrypted, automatic failover)
+  private subnets: Aurora PostgreSQL (encrypted, writer by default)
+                   ElastiCache Valkey (encrypted, one node by default)
 ```
 
 Three decisions are load-bearing and worth understanding before changing
@@ -219,8 +219,10 @@ Two examples ship here.
 7-day backups, CloudTrail and GuardDuty off. Staging exists to test the
 software, so it does not pay for infrastructure it is not testing.
 
-`example.prod.tfvars` — NLB across two AZs, two nodes, Aurora writer + reader,
-cache with a replica, 35-day backups, CloudTrail and GuardDuty on.
+`example.prod.tfvars` — NLB across two AZs, two application nodes, one Aurora
+writer, one cache node, 35-day backups, CloudTrail and GuardDuty on. Database
+readers and cache replicas are explicit opt-ins because they add always-on
+cost; production does not imply Multi-AZ data services.
 
 ### Accounts and regions
 
@@ -277,11 +279,12 @@ difference is entirely about counts versus instance types.**
 
 So:
 
-**`small` → `medium` is a live change.** It moves counts only — 2 nodes to 4,
-1 reader to 2 — plus the cache node type. Everything except the cache is purely
-additive; the cache resize is a few seconds of failover that any client with
-reconnect logic absorbs. Do the cache in the maintenance window (it waits there
-by default, since `apply_immediately = false`) and the API tier during the day.
+**`small` → `medium` grows the API tier live, but still needs a cache window.**
+It moves from 2 nodes to 4 and changes the cache node type; it does not add a
+database reader or cache replica. The application nodes are purely additive.
+The single cache node reconnects during its resize, so apply that change in the
+maintenance window (it waits there by default because
+`apply_immediately = false`) and grow the API tier during the day.
 
 **`medium` → `large` is not.** It changes `node_type` and `db_class`, and a
 blind `tofu apply` would stop every node at once and restart the writer. Roll it:
@@ -293,10 +296,10 @@ tofu apply -var-file=envs/<env>.tfvars -target='module.nodes.aws_instance.node[2
 # ... leaving the gatekeeper (index 0) for last
 ```
 
-For Aurora, change the readers first, then fail over onto a resized reader, then
-change the old writer. Terraform will not sequence that for you — do the
-failover with `aws rds failover-db-cluster` between applies, or accept one
-restart in a window.
+For Aurora, the cost-conscious default has no reader to fail over to, so resize
+the writer in a maintenance window. If the application cannot tolerate that
+restart, temporarily opt into a reader, fail over onto the resized reader, then
+resize the old writer and remove the temporary reader after the change.
 
 **Adding nodes has a provisioning step Terraform does not cover.** A new
 instance comes up from the AMI with no certificates. The edge convergence sweep

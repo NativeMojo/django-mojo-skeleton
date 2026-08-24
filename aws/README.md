@@ -31,8 +31,8 @@ This file is the *how*; that file is the *why*.
    └─────────┬─────────┘
              │
    ┌─────────┴──────────┐
-   │  Aurora PostgreSQL │  writer + reader, encrypted, in private subnets
-   │  Valkey (Redis)    │  primary + replica
+   │  Aurora PostgreSQL │  writer by default, encrypted, private
+   │  Valkey (Redis)    │  one rebuildable node by default
    └────────────────────┘
 ```
 
@@ -107,9 +107,14 @@ One word controls capacity:
 | `size` | nodes | database | cache |
 |---|---|---|---|
 | `micro` | 1 | writer only | 1 node |
-| `small` | 2 | writer + 1 reader | 2 nodes |
-| `medium` | 4 | writer + 2 readers | 2 bigger nodes |
-| `large` | 6 | bigger writer + 2 readers | 3 bigger nodes |
+| `small` | 2 | writer only | 1 node |
+| `medium` | 4 | writer only | 1 bigger node |
+| `large` | 6 | bigger writer only | 1 bigger node |
+
+Readers and cache replicas are supported overrides, but no preset enables them.
+They are paid availability choices and must be selected deliberately from the
+application's recovery requirements rather than inferred from the word
+"production."
 
 Going from `small` to `medium` is safe to do on a live system — it only adds
 machines. Going to `large` changes machine *types*, which requires restarting
