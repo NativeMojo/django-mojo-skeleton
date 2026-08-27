@@ -267,6 +267,48 @@ Check whether every node actually got it. The whole point of the timer-based
 design is that a node fixes itself, so a node stuck on old code is usually a node
 that cannot reach S3 — check its credentials and its outbound network.
 
+**A deploy fails on the health probe — "previous API did not return HTTP 200"**
+The API is probably fine; the probe is wrong. `probe_api` curls `$PROBE_URL`,
+default `https://127.0.0.1/api/version`. If nginx on that node has no vhost for
+the literal IP, TLS fails SNI with "unrecognized name" and curl returns 000 —
+which fails the candidate probe *and* the rollback probe, so a healthy API
+reports the message above and the deploy leaves a retained transaction under
+`/var/lib/django-mojo-deploy/active`. Export `PROBE_URL` in **`aws/update.sh`**,
+pointing at a name the node can resolve and terminate TLS for. It must be that
+file: `update.sh` passes the value into the transient deployment unit with
+`--setenv`, so exporting it in `aws/post_deploy.sh` is read too late and does
+nothing.
+
+**A deploy fails with "packaged update.sh not found"**
+A project shim reconstructed the path to the packaged script by hand instead of
+asking `python3 -m mojo.deploy locate`. The framework has relocated these before
+(`deploy/scripts/` → `deploy/project_scripts/`) and will again. Worse, the shim
+exits **before** the packaged script opens `var/update.log`, so a failed deploy
+leaves no log line at all: the symptom is a node that silently stops advancing
+while pushes appear to succeed. Use the locator; never rebuild the path.
+
+**`aws` on a node fails with `ModuleNotFoundError: No module named 'awscli'`**
+The rpm `awscli-2` is built for the distro's older Python (on AL2023, 3.9,
+`/usr/lib/python3.9/site-packages/awscli`), and its `/usr/bin/aws` shebang says
+`#! /usr/bin/python3 -s`. Provisioning points `/usr/bin/python3` at 3.12 for the
+app, so the CLI resolves to an interpreter with no awscli. **Do not repoint
+`/usr/bin/python3` at 3.9** — the framework needs 3.12, and the deploy plane runs
+`python3 ./bin/manage.py` and `python3 -m mojo.deploy`. Shadow the CLI instead,
+which also survives `dnf update awscli-2` (editing `/usr/bin/aws` does not — the
+package restores the broken shebang with no signal):
+
+```bash
+sudo tee /usr/local/bin/aws >/dev/null <<'EOF'
+#!/bin/bash
+exec /usr/bin/python3.9 -s /usr/bin/aws "$@"
+EOF
+sudo chmod 0755 /usr/local/bin/aws
+```
+
+Worth knowing beyond the fix: with stderr discarded (`2>/dev/null`), this error
+is indistinguishable from an IAM denial, and has produced confident wrong
+conclusions about a node's permissions. Use `boto3` when scripting on a node.
+
 **Something changed and nobody knows who**
 CloudTrail records every AWS action. Whether you have it depends on which path
 stood the environment up: the OpenTofu root creates a multi-region trail
