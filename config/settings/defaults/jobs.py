@@ -21,7 +21,7 @@ JOBS_CHANNELS = [
     'default', 'priority', 'cleanup',
     'incident_handlers', 'renditions', 'certs',
     'webhooks', 'webhook_fanout',
-    'edge',
+    'edge', 'firewall',
     # this project's own
     'email', 'media', 'metrics',
 ]

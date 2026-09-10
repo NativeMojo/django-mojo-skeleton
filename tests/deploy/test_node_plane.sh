@@ -71,6 +71,7 @@ APP_CONF="$REPO/aws/nginx/conf.d/app.conf"
 MOJO_CONF="$REPO/aws/nginx/conf.d/mojo.conf"
 NGINX_CONF="$REPO/aws/nginx/nginx.conf"
 PROD_SETTINGS="$REPO/config/settings/prod/__init__.py"
+JOB_SETTINGS="$REPO/config/settings/defaults/jobs.py"
 TF_NODES="$REPO/aws/terraform/modules/nodes/main.tf"
 TF_STAGING="$REPO/aws/terraform/envs/example.staging.tfvars"
 TF_PROD="$REPO/aws/terraform/envs/example.prod.tfvars"
@@ -346,6 +347,10 @@ assert_lacks "$PROD_SETTINGS" "^EDGE_RESERVED_SERVER_NAMES" \
     "the retired EDGE_RESERVED_SERVER_NAMES setting is not assigned"
 assert_has "$PROD_SETTINGS" "0005_remove_vhost_claims_reserved" \
     "with the retirement note naming the migration that dropped it"
+
+echo "settings: every framework job channel has a consumer"
+assert_fixed "$JOB_SETTINGS" "'firewall'" \
+    "the firewall reconciliation channel is consumed by fresh projects"
 
 echo "deploy.py: the KSMSecrets KMS key is provisioned and wired into the conf"
 # dnsman's AcmeAccount/Certificate are KSMSecrets models — no KMS_KEY_ID means
