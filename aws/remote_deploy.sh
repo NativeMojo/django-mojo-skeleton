@@ -182,7 +182,7 @@ REMOTE
 fi
 
 log ""
-if ! ssh_run "test \"\$(cat ${PROJ_PATH}/var/profile 2>/dev/null)\" = prod"; then
+if ! ssh_run "test \"\$(cat \"${PROJ_PATH}/var/profile\" 2>/dev/null)\" = prod"; then
     log "WARNING: ${PROJ_PATH}/var/profile on the node does not read prod. Until it"
     log "WARNING: does, the app and its jobs boot settings.local (#9315)."
 fi
