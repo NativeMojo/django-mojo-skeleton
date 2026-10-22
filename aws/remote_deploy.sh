@@ -182,6 +182,10 @@ REMOTE
 fi
 
 log ""
+if ! ssh_run "test \"\$(cat ${PROJ_PATH}/var/profile 2>/dev/null)\" = prod"; then
+    log "WARNING: ${PROJ_PATH}/var/profile on the node does not read prod. Until it"
+    log "WARNING: does, the app and its jobs boot settings.local (#9315)."
+fi
 log "Done. Remaining manual steps if not already set:"
 log "  1. echo 'prod' > ${PROJ_PATH}/var/profile"
 log "  2. Edit ${PROJ_PATH}/var/django.conf with DB/cache/AWS credentials"

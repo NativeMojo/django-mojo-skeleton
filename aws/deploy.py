@@ -982,7 +982,13 @@ set -euo pipefail
 export PROJ_PATH=/opt/api
 export REMOVE_SSM=y
 export TARGET_HOSTNAME={hostname}
-curl -fsSL https://gist.githubusercontent.com/iamojo/6b422432719106aef8d713fb9a24ed67/raw/ec2_django_mojo_install.sh | bash
+# The profile goes down before the installer runs anything (#9315): without
+# it a node that starts the app boots settings.local. The installer chowns
+# /opt/api itself. Pinned to a gist revision so a node never runs whatever the
+# gist holds today.
+mkdir -p /opt/api/var
+echo prod > /opt/api/var/profile
+curl -fsSL https://gist.githubusercontent.com/iamojo/6b422432719106aef8d713fb9a24ed67/raw/2a39c146170ca07cfd64f8e8e076082c344fa609/ec2_django_mojo_install.sh | bash
 """
 
         print(f"  Launching EC2 instance '{instance_name}' (hostname: {hostname}, AMI: {ami_label})...")
@@ -1191,6 +1197,12 @@ def bake_ami(session, region, dry_run=False):
     result = subprocess.run(
         ["ssh", "-i", pem_file, "-o", "StrictHostKeyChecking=no", f"ec2-user@{node1['elastic_ip']}", "sudo bash -s"],
         input="""set -euo pipefail
+# Every clone of this image boots node1's var/profile. Without "prod" they
+# would all run settings.local (SSL redirect off, local database) (#9315).
+if [ "$(cat /opt/api/var/profile 2>/dev/null)" != "prod" ]; then
+    echo "/opt/api/var/profile does not read prod; refusing to bake an image that boots settings.local" >&2
+    exit 3
+fi
 systemctl enable --now nginx crond rsyslog mojo-asgi
 rm -f /opt/api/var/pids/*.pid
 """,
@@ -1199,6 +1211,8 @@ rm -f /opt/api/var/pids/*.pid
     print(result.stdout)
     if result.returncode != 0:
         print(f"  ERROR: pre-bake check failed (exit {result.returncode}): {result.stderr[-500:]}")
+        if result.returncode == 3:
+            print("  (node1 has no prod var/profile — run --step ec2-setup, or write it, before baking)")
         print("  (mojo-asgi enable failing is expected if var/django.conf isn't fully configured yet — fix that first)")
         return None
 

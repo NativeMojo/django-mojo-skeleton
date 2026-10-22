@@ -158,8 +158,13 @@ find "${PROJ_PATH}/var" -path "${PROJ_PATH}/var/edge" -prune -o -type f -exec ch
 log ""
 log "Project deploy complete."
 log ""
+if [ "$(cat "${PROJ_PATH}/var/profile" 2>/dev/null)" != "prod" ]; then
+    log "WARNING: ${PROJ_PATH}/var/profile does not read prod. Until it does, the"
+    log "WARNING: app and its jobs boot settings.local (SSL redirect off, local DB)."
+    log "WARNING: Fix: echo prod > ${PROJ_PATH}/var/profile   (#9315)"
+fi
 log "Remaining steps:"
-log "  1. echo 'prod' > ${PROJ_PATH}/var/profile"
+log "  1. echo 'prod' > ${PROJ_PATH}/var/profile   (if the warning above showed)"
 log "  2. Edit ${PROJ_PATH}/var/django.conf with DB/cache/AWS credentials"
 log "  3. python3 ${PROJ_PATH}/bin/manage.py migrate"
 log "  4. Certificates —"
