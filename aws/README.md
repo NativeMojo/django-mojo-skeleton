@@ -339,6 +339,20 @@ Stage 1 renders the installed framework's deploy assets into
 `mojo.deploy.node_setup`, so the units installed on a node always match the
 pinned django-mojo package.
 
+**The settings profile (#9315).** `var/profile` selects the settings module
+every process loads; without it the app runs `settings.local`. Every path
+writes `prod` before the app starts: stage 1 right after the untar, the
+first-time `--step ec2` user data before the installer, `ec2-setup`, and
+`ec2_deploy.sh` on a box that has never served, meaning systemd reports
+`mojo-asgi` stopped and either not installed or disabled (any other state,
+including running while disabled or no answer, is left alone and gets a
+warning). A golden-image clone writes it on first
+boot if the image lacks it, then restarts `mojo-asgi` and the job engines. An
+existing value is never overwritten. To make a node refuse to start without
+it, see django-mojo's `MOJO_REQUIRED_PROFILE` (opt-in, in `var/django.conf`);
+`python3 -m mojo.deploy.check_node --section profile` reports each node's
+marker.
+
 **Built and tested**
 - The OpenTofu root parses, formats and validates, and describes the whole
   environment (network, load balancer, nodes, database, cache, alarms). It is

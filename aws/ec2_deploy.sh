@@ -99,6 +99,32 @@ if [[ -f "$REPO_SUDOERS" ]]; then
     fi
 fi
 
+# ── Settings profile (#9315) ─────────────────────────────────────────────────
+# Before node_setup enables mojo-asgi: on a box that has never served, the
+# marker goes down now, so the app, its jobs and cron start on settings.prod
+# instead of settings.local. "Never served" needs systemd to say so: mojo-asgi
+# is stopped ("inactive") and either not installed or disabled. Any other
+# answer (running though disabled, starting, failed, masked, or no answer at
+# all) leaves the box alone, because writing prod there would flip a serving
+# node's settings at its next restart; it gets the warning at the end. An
+# existing value is never overwritten.
+# >>> profile-marker (#9315)
+PROFILE_FILE="${PROJ_PATH}/var/profile"
+PROFILE_WRITTEN=0
+ASGI_ENABLED="$(systemctl is-enabled mojo-asgi 2>/dev/null || true)"
+ASGI_ACTIVE="$(systemctl is-active mojo-asgi 2>/dev/null || true)"
+if [ -z "$(tr -d '[:space:]' < "$PROFILE_FILE" 2>/dev/null)" ] && \
+        [ "$ASGI_ACTIVE" = inactive ] && \
+        { [ "$ASGI_ENABLED" = not-found ] || [ "$ASGI_ENABLED" = disabled ]; }; then
+    mkdir -p "${PROJ_PATH}/var"
+    echo prod > "$PROFILE_FILE"
+    chown ec2-user:www "$PROFILE_FILE"
+    chmod 640 "$PROFILE_FILE"
+    PROFILE_WRITTEN=1
+    log "Wrote prod to ${PROFILE_FILE} (this box has never served)."
+fi
+# <<< profile-marker
+
 # ── Systemd units, var dirs, jobs cron ───────────────────────────────────────
 # Packaged convergence, not a local copy: django-mojo is reinstalled on every
 # deploy, so a fix to any of these three actions reaches this node without the
@@ -154,6 +180,13 @@ log "Setting var directory ownership..."
 chown -R ec2-user:www "${PROJ_PATH}/var"
 find "${PROJ_PATH}/var" -path "${PROJ_PATH}/var/edge" -prune -o -type d -exec chmod 2775 {} +
 find "${PROJ_PATH}/var" -path "${PROJ_PATH}/var/edge" -prune -o -type f -exec chmod 0664 {} +
+# The sweep above made every var file 0664; a marker this run wrote goes back
+# to 640, as stage 1 and the golden clone leave it.
+# >>> profile-mode (#9315)
+if [ "${PROFILE_WRITTEN:-0}" = 1 ]; then
+    chmod 640 "${PROJ_PATH}/var/profile"
+fi
+# <<< profile-mode
 
 log ""
 log "Project deploy complete."
