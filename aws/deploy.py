@@ -974,6 +974,21 @@ set -euo pipefail
 hostnamectl set-hostname {hostname}
 echo "{hostname}" > /etc/hostname
 sed -i "s/127.0.0.1.*/127.0.0.1   localhost {hostname}/" /etc/hosts
+# Images baked before the bake check (#9315) can lack the settings profile, so
+# their clones start the app on settings.local and join the load balancer.
+# Write prod if it is missing or empty (never over an existing value) and move
+# an already-started app and its job engines onto it.
+# >>> golden-profile (#9315)
+PROFILE_FILE=/opt/api/var/profile
+if [ -z "$(tr -d '[:space:]' < "$PROFILE_FILE" 2>/dev/null)" ]; then
+    mkdir -p /opt/api/var
+    echo prod > "$PROFILE_FILE"
+    chown ec2-user:www "$PROFILE_FILE"
+    chmod 640 "$PROFILE_FILE"
+    systemctl try-restart mojo-asgi || true
+    /opt/api/bin/jobman restart || true
+fi
+# <<< golden-profile
 """
         else:
             # First-time node (no golden image yet) — full system bootstrap via curl.

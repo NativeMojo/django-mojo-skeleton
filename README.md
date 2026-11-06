@@ -74,8 +74,10 @@ python aws/deploy.py
 
 # On EC2 (after bootstrap runs via user_data):
 git clone git@github.com:YourOrg/my-new-project.git /opt/api
+# The settings profile goes down before anything starts. On a box that has
+# never served, ec2_deploy.sh writes it too (and never overwrites one).
+sudo mkdir -p /opt/api/var && echo "prod" | sudo tee /opt/api/var/profile
 sudo bash /opt/api/aws/ec2_deploy.sh
-echo "prod" > /opt/api/var/profile
 # Create or edit /opt/api/var/django.conf with the SECRET_KEY and environment credentials
 /opt/api/.venv/bin/python /opt/api/bin/manage.py migrate
 sudo certbot --nginx -d yourdomain.com

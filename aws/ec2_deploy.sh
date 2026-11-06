@@ -99,6 +99,27 @@ if [[ -f "$REPO_SUDOERS" ]]; then
     fi
 fi
 
+# ── Settings profile (#9315) ─────────────────────────────────────────────────
+# Before node_setup enables mojo-asgi: on a box that has never served, the
+# marker goes down now, so the app, its jobs and cron start on settings.prod
+# instead of settings.local. A box whose mojo-asgi is already enabled is left
+# alone — writing prod there would flip a serving node's settings at its next
+# restart — and gets the warning at the end. An existing value is never
+# overwritten.
+# >>> profile-marker (#9315)
+PROFILE_FILE="${PROJ_PATH}/var/profile"
+PROFILE_WRITTEN=0
+if [ -z "$(tr -d '[:space:]' < "$PROFILE_FILE" 2>/dev/null)" ] && \
+        ! systemctl is-enabled --quiet mojo-asgi 2>/dev/null; then
+    mkdir -p "${PROJ_PATH}/var"
+    echo prod > "$PROFILE_FILE"
+    chown ec2-user:www "$PROFILE_FILE"
+    chmod 640 "$PROFILE_FILE"
+    PROFILE_WRITTEN=1
+    log "Wrote prod to ${PROFILE_FILE} (this box has never served)."
+fi
+# <<< profile-marker
+
 # ── Systemd units, var dirs, jobs cron ───────────────────────────────────────
 # Packaged convergence, not a local copy: django-mojo is reinstalled on every
 # deploy, so a fix to any of these three actions reaches this node without the
@@ -154,6 +175,13 @@ log "Setting var directory ownership..."
 chown -R ec2-user:www "${PROJ_PATH}/var"
 find "${PROJ_PATH}/var" -path "${PROJ_PATH}/var/edge" -prune -o -type d -exec chmod 2775 {} +
 find "${PROJ_PATH}/var" -path "${PROJ_PATH}/var/edge" -prune -o -type f -exec chmod 0664 {} +
+# The sweep above made every var file 0664; a marker this run wrote goes back
+# to 640, as stage 1 and the golden clone leave it.
+# >>> profile-mode (#9315)
+if [ "${PROFILE_WRITTEN:-0}" = 1 ]; then
+    chmod 640 "${PROJ_PATH}/var/profile"
+fi
+# <<< profile-mode
 
 log ""
 log "Project deploy complete."
