@@ -107,12 +107,25 @@ PY
 }
 
 # systemctl / chown / jobman stubs, all logging to $TMP/calls.log.
-#   STUB_ENABLED=1         `systemctl is-enabled` succeeds (a serving box)
-#   STUB_SYSTEMCTL_FAIL=1  every other systemctl call fails
+#   STUB_IS_ENABLED=<state>  what `systemctl is-enabled` prints (default not-found)
+#   STUB_IS_ACTIVE=<state>   what `systemctl is-active` prints (default inactive)
+#   STUB_QUERY_FAIL=1        both queries print nothing and fail (no answer)
+#   STUB_SYSTEMCTL_FAIL=1    every other systemctl call fails
+# Exit codes follow systemd: is-enabled 0 for an enabled-like state,
+# is-active 0 only for active.
 cat > "$TMP/stub/systemctl" <<STUB
 #!/bin/bash
 echo "systemctl \$*" >> "$TMP/calls.log"
-if [ "\$1" = "is-enabled" ]; then [ "\${STUB_ENABLED:-0}" = 1 ]; exit \$?; fi
+case "\$1" in
+    is-enabled|is-active)
+        if [ "\${STUB_QUERY_FAIL:-0}" = 1 ]; then echo "Failed to connect to bus" >&2; exit 1; fi
+        if [ "\$1" = is-enabled ]; then
+            state="\${STUB_IS_ENABLED:-not-found}"; echo "\$state"
+            case "\$state" in enabled|enabled-runtime|static|alias|indirect|generated|transient) exit 0 ;; not-found) exit 4 ;; *) exit 1 ;; esac
+        fi
+        state="\${STUB_IS_ACTIVE:-inactive}"; echo "\$state"
+        [ "\$state" = active ] && exit 0; exit 3 ;;
+esac
 [ "\${STUB_SYSTEMCTL_FAIL:-0}" = 1 ] && exit 1
 exit 0
 STUB
@@ -134,24 +147,37 @@ if grep -q "# >>> profile-marker" "$DEPLOY_SH" && grep -q "# >>> profile-mode" "
       echo 'chmod 0664 "${PROJ_PATH}/var/profile" 2>/dev/null || true  # the var sweep'
       cat "$TMP/mode.sh"; } > "$TMP/ec2_deploy_block.sh"
     PROJ="$TMP/edroot"
-    run_ed() { # enabled
+    run_ed() { # is-enabled is-active [query_fail]
         rm -rf "$PROJ"; mkdir -p "$PROJ/var"; : > "$TMP/calls.log"
-        PATH="$TMP/stub:$PATH" STUB_ENABLED="$1" PROJ_PATH="$PROJ" \
-            bash -euo pipefail "$TMP/ec2_deploy_block.sh" > "$TMP/ed.out" 2>&1
+        PATH="$TMP/stub:$PATH" STUB_IS_ENABLED="$1" STUB_IS_ACTIVE="$2" STUB_QUERY_FAIL="${3:-0}" \
+            PROJ_PATH="$PROJ" bash -euo pipefail "$TMP/ec2_deploy_block.sh" > "$TMP/ed.out" 2>&1
     }
-    run_ed 0; rc=$?
+    run_ed not-found inactive; rc=$?
     assert_eq "$rc" 0 "fresh box: the block exits 0"
     assert_eq "$(cat "$PROJ/var/profile" 2>/dev/null)" "prod" "fresh box gets prod"
     assert_eq "$(perm "$PROJ/var/profile")" "640" "fresh box: the marker ends 640, after the var sweep"
     assert_has "$TMP/calls.log" "chown ec2-user:www $PROJ/var/profile" "fresh box: the marker is chowned ec2-user:www"
 
-    run_ed 1; rc=$?
-    assert_eq "$rc" 0 "serving box: the block exits 0"
-    if [ -e "$PROJ/var/profile" ]; then fail "serving box is left alone (a marker was written)"; else ok "serving box is left alone"; fi
+    run_ed disabled inactive; rc=$?
+    assert_eq "$(cat "$PROJ/var/profile" 2>/dev/null)" "prod" "unit installed, disabled and stopped: gets prod"
+
+    # Anything that is, or may be, serving is left alone (review 175522).
+    for states in "enabled active" "disabled active" "enabled inactive" "disabled activating" \
+                  "disabled failed" "masked inactive" "static inactive" "disabled reloading"; do
+        set -- $states
+        run_ed "$1" "$2"; rc=$?
+        assert_eq "$rc" 0 "is-enabled $1, is-active $2: the block exits 0"
+        if [ -e "$PROJ/var/profile" ]; then fail "is-enabled $1, is-active $2: left alone (a marker was written)"
+        else ok "is-enabled $1, is-active $2: left alone"; fi
+    done
+    run_ed not-found inactive 1; rc=$?
+    assert_eq "$rc" 0 "systemctl gives no answer: the block exits 0"
+    if [ -e "$PROJ/var/profile" ]; then fail "systemctl gives no answer: left alone (a marker was written)"
+    else ok "systemctl gives no answer: left alone"; fi
 
     for existing in local prod; do
         rm -rf "$PROJ"; mkdir -p "$PROJ/var"; echo "$existing" > "$PROJ/var/profile"; : > "$TMP/calls.log"
-        PATH="$TMP/stub:$PATH" STUB_ENABLED=0 PROJ_PATH="$PROJ" \
+        PATH="$TMP/stub:$PATH" PROJ_PATH="$PROJ" \
             bash -euo pipefail "$TMP/ec2_deploy_block.sh" > "$TMP/ed.out" 2>&1
         assert_eq "$(cat "$PROJ/var/profile")" "$existing" "marker '$existing' is never overwritten"
         assert_lacks "$TMP/calls.log" "chown" "marker '$existing': nothing is chowned"
