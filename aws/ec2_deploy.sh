@@ -102,15 +102,20 @@ fi
 # ── Settings profile (#9315) ─────────────────────────────────────────────────
 # Before node_setup enables mojo-asgi: on a box that has never served, the
 # marker goes down now, so the app, its jobs and cron start on settings.prod
-# instead of settings.local. A box whose mojo-asgi is already enabled is left
-# alone — writing prod there would flip a serving node's settings at its next
-# restart — and gets the warning at the end. An existing value is never
-# overwritten.
+# instead of settings.local. "Never served" needs systemd to say so: mojo-asgi
+# is stopped ("inactive") and either not installed or disabled. Any other
+# answer (running though disabled, starting, failed, masked, or no answer at
+# all) leaves the box alone, because writing prod there would flip a serving
+# node's settings at its next restart; it gets the warning at the end. An
+# existing value is never overwritten.
 # >>> profile-marker (#9315)
 PROFILE_FILE="${PROJ_PATH}/var/profile"
 PROFILE_WRITTEN=0
+ASGI_ENABLED="$(systemctl is-enabled mojo-asgi 2>/dev/null || true)"
+ASGI_ACTIVE="$(systemctl is-active mojo-asgi 2>/dev/null || true)"
 if [ -z "$(tr -d '[:space:]' < "$PROFILE_FILE" 2>/dev/null)" ] && \
-        ! systemctl is-enabled --quiet mojo-asgi 2>/dev/null; then
+        [ "$ASGI_ACTIVE" = inactive ] && \
+        { [ "$ASGI_ENABLED" = not-found ] || [ "$ASGI_ENABLED" = disabled ]; }; then
     mkdir -p "${PROJ_PATH}/var"
     echo prod > "$PROFILE_FILE"
     chown ec2-user:www "$PROFILE_FILE"

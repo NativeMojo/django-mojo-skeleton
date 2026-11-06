@@ -343,8 +343,10 @@ pinned django-mojo package.
 every process loads; without it the app runs `settings.local`. Every path
 writes `prod` before the app starts: stage 1 right after the untar, the
 first-time `--step ec2` user data before the installer, `ec2-setup`, and
-`ec2_deploy.sh` on a box whose `mojo-asgi` has never been enabled (a serving
-box is left alone and gets a warning). A golden-image clone writes it on first
+`ec2_deploy.sh` on a box that has never served, meaning systemd reports
+`mojo-asgi` stopped and either not installed or disabled (any other state,
+including running while disabled or no answer, is left alone and gets a
+warning). A golden-image clone writes it on first
 boot if the image lacks it, then restarts `mojo-asgi` and the job engines. An
 existing value is never overwritten. To make a node refuse to start without
 it, see django-mojo's `MOJO_REQUIRED_PROFILE` (opt-in, in `var/django.conf`);
